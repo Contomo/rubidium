@@ -39,6 +39,13 @@ right now:
 
 ---
 
+## Install
+To install this plugin, run the installation script using the following command over SSH. 
+```
+wget -O - https://raw.githubusercontent.com/Contomo/rubidium/main/install.sh | bash
+```
+This script will download this GitHub repository to your RaspberryPi home directory, and symlink the files in the Klipper extra folder.
+
 
 ## Status
 
