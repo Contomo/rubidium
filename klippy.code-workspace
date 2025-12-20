@@ -1,0 +1,85 @@
+{
+	"folders": [
+		{
+			"name": "rubidium",
+			"path": "."
+		},
+		{
+			"name": "rubedo",
+			"path": "../rubedo"
+		},
+		{
+			"name": "klipper",
+			"path": "../klipper"
+		},
+		{
+			"name": "printer-config",
+			"path": "../printer_data/config"
+		}
+	],
+	"settings": {
+		"git.autoRepositoryDetection": "openEditors",
+		"editor.hover.enabled": "on",
+		"editor.hover.delay": 300,
+		"editor.codeLens": false,
+		"python.defaultInterpreterPath": "/home/klippy/klippy-env/bin/python",
+		"python.analysis.typeCheckingMode": "standard",
+		"python.analysis.diagnosticMode": "openFilesOnly",
+		"python.analysis.diagnosticSeverityOverrides": {
+			"reportMissingTypeStubs": "none"
+		},
+		"python.analysis.exclude": [
+			"**/.git/**",
+			"**/.vscode/**",
+			"**/.vscode-server/**",
+			"**/__pycache__/**",
+			"**/.pytest_cache/**",
+			"**/.mypy_cache/**",
+			"**/.ruff_cache/**",
+			"**/.venv/**",
+			"**/venv/**",
+			"**/klippy-env/**",
+			"**/moonraker-env/**",
+			"**/printer_data/database/**",
+			"**/printer_data/gcodes/**",
+			"**/printer_data/logs/**",
+			"**/printer_data/comms/**"
+		],
+		"search.exclude": {
+			"**/.git/**": true,
+			"**/.vscode/**": true,
+			"**/.vscode-server/**": true,
+			"**/__pycache__/**": true,
+			"**/.pytest_cache/**": true,
+			"**/.mypy_cache/**": true,
+			"**/.ruff_cache/**": true,
+			"**/.cache/**": true,
+			"**/.venv/**": true,
+			"**/venv/**": true,
+			"**/klippy-env/**": true,
+			"**/moonraker-env/**": true,
+			"**/printer_data/database/**": true,
+			"**/printer_data/gcodes/**": true,
+			"**/printer_data/logs/**": true,
+			"**/printer_data/comms/**": true
+		},
+		"files.watcherExclude": {
+			"**/.git/**": true,
+			"**/.vscode/**": true,
+			"**/.vscode-server/**": true,
+			"**/__pycache__/**": true,
+			"**/.pytest_cache/**": true,
+			"**/.mypy_cache/**": true,
+			"**/.ruff_cache/**": true,
+			"**/.cache/**": true,
+			"**/.venv/**": true,
+			"**/venv/**": true,
+			"**/klippy-env/**": true,
+			"**/moonraker-env/**": true,
+			"**/printer_data/database/**": true,
+			"**/printer_data/gcodes/**": true,
+			"**/printer_data/logs/**": true,
+			"**/printer_data/comms/**": true
+		}
+	}
+}

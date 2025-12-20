@@ -1,0 +1,8 @@
+{
+    "python.defaultInterpreterPath": "/home/klippy/klippy-env/bin/python",
+    "python.analysis.typeCheckingMode": "standard",
+    "python.analysis.diagnosticMode": "workspace",
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportMissingTypeStubs": "none"
+    }
+}
