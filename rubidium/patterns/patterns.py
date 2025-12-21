@@ -162,7 +162,7 @@ class LinesPatternType(PatternType):
                 segs.append(LineSegment(seg_start, seg_end, str(tag)))
                 x0 = x1
 
-            lines_list.append(Line(idx=idx, pa_value=pa, start=start_pt, end=end_pt, segments=tuple(segs)))
+            lines_list.append(Line(idx=idx, parameter_value=pa, start=start_pt, end=end_pt, segments=tuple(segs)))
 
         return Lines(tuple(lines_list))
 

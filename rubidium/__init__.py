@@ -60,6 +60,13 @@ def load_config_prefix(config: Any):
             return RubidiumAnalyse(config)
         else:
             raise config.error(f'Invalid section [{cfg_name}], analyse sections may not be named (yet)')
+        
+    if kind == "latency":
+        if len(parts) == 2:
+            from .modes.latency_mode import RubidiumLatency
+            return RubidiumLatency(config)
+        else:
+            raise config.error(f'Invalid section [{cfg_name}], latency sections may not be named (yet)')
 
     if kind == "pattern":
         from .patterns.patterns import RubidiumPatternObject

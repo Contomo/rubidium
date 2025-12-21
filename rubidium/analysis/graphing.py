@@ -34,7 +34,7 @@ class RubidiumPaths:
                 )
             root = cfg_dir / "rubidium"
 
-        scan_dir = Path(self.cv.get_str("scan_dir", str(root / "scan"))).expanduser()
+        scan_dir     = Path(self.cv.get_str("scan_dir", str(root / "scan"))).expanduser()
         analysis_dir = Path(self.cv.get_str("analysis_dir", str(root / "analysis"))).expanduser()
 
         self.dirs = RunDirs(root=root, scan=scan_dir, analysis=analysis_dir)

@@ -8,83 +8,88 @@ from typing import Any, Optional
 
 @dataclass(slots=True)
 class ConfigView:
-    """Read options from an override section with fallback to a base section."""
-
     base: Any
     override: Any
 
-    # -----------------------------------------------------------------
-    # existence
-
     @staticmethod
-    def _has_option(sec: Any, name: str) -> bool:
-        has_opt = getattr(sec, "has_option", None)
-        if callable(has_opt):
-            return bool(has_opt(name))
-        getter = getattr(sec, "get", None)
-        if callable(getter):
-            return getter(name, None) is not None
-        return False
+    def _has(sec, name: str) -> bool:
+        try:
+            sec.get(name)
+            return True
+        except Exception:
+            return False
 
-    def _get_from(self, method: str, name: str, default, **kwargs):
-        o = self.override
-        b = self.base
+    def _pick(self, name: str) -> Any:
+        if self._has(self.override, name):
+            return self.override
+        if self._has(self.base, name):
+            return self.base
+        return self.override
 
-        og = getattr(o, method, None)
-        if callable(og) and self._has_option(o, name):
-            return og(name, default, **kwargs)
 
-        bg = getattr(b, method, None)
-        if callable(bg) and self._has_option(b, name):
-            return bg(name, default, **kwargs)
-
-        return default
-
-    # -----------------------------------------------------------------
-    # primitives
+    # ---------------- primitives
 
     def get_str(self, name: str, default: str) -> str:
-        return str(self._get_from("get", name, default)).strip()
+        sec = self._pick(name)
+        return str(sec.get(name, default)).strip()
+
+    def get_int(self, name: str, default: int, **kwargs) -> int:
+        sec = self._pick(name)
+        return int(sec.getint(name, default, **kwargs))
+
+    def get_float(self, name: str, default: float, **kwargs) -> float:
+        sec = self._pick(name)
+        return float(sec.getfloat(name, default, **kwargs))
+
+    def get_bool(self, name: str, default: bool) -> bool:
+        sec = self._pick(name)
+        return bool(sec.getboolean(name, default))
 
     def get_str_opt(self, name: str) -> Optional[str]:
-        v = self._get_from("get", name, None)
+        sec = self._pick(name)
+        v = sec.get(name, None)
         if v is None:
             return None
         s = str(v).strip()
         return s if s else None
 
-    def get_int(self, name: str, default: int, **kwargs) -> int:
-        return int(self._get_from("getint", name, default, **kwargs)) # type: ignore
+    def get_int_opt(self, name: str, **kwargs) -> Optional[int]:
+        sec = self._pick(name)
+        v = sec.getint(name, None, **kwargs)
+        if v is None:
+            return None
+        s = int(v)
+        return s if s else None
 
-    def get_float(self, name: str, default: float, **kwargs) -> float:
-        return float(self._get_from("getfloat", name, default, **kwargs)) # type: ignore
+    # ---------------- required variants
 
-    def get_bool(self, name: str, default: bool) -> bool:
-        return bool(self._get_from("getboolean", name, default))
+    def require_str(self, name: str) -> str:
+        if self._has(self.override, name):
+            return str(self.override.get(name)).strip()
+        if self._has(self.base, name):
+            return str(self.base.get(name)).strip()
+        return str(self.override.get(name)).strip()
 
-    # -----------------------------------------------------------------
-    # "required" variants
+    def require_int(self, name: str, **kwargs) -> int:
+        if self._has(self.override, name):
+            return int(self.override.getint(name, **kwargs))
+        if self._has(self.base, name):
+            return int(self.base.getint(name, **kwargs))
+        return int(self.override.getint(name, **kwargs))
 
-    def require_str(self, name: str, *, where: str) -> str:
-        v = self.get_str_opt(name)
-        if not v:
-            raise RuntimeError(f"rubidium: missing required option '{name}' in {where}")
-        return v
+    def require_float(self, name: str, **kwargs) -> float:
+        if self._has(self.override, name):
+            return float(self.override.getfloat(name, **kwargs))
+        if self._has(self.base, name):
+            return float(self.base.getfloat(name, **kwargs))
+        return float(self.override.getfloat(name, **kwargs))
 
-    def require_int(self, name: str, *, where: str, **kwargs) -> int:
-        if not (self._has_option(self.override, name) or self._has_option(self.base, name)):
-            raise RuntimeError(f"rubidium: missing required option '{name}' in {where}")
-        return self.get_int(name, 0, **kwargs)
-
-    def require_float(self, name: str, *, where: str, **kwargs) -> float:
-        if not (self._has_option(self.override, name) or self._has_option(self.base, name)):
-            raise RuntimeError(f"rubidium: missing required option '{name}' in {where}")
-        return self.get_float(name, 0.0, **kwargs)
-
-    def require_bool(self, name: str, *, where: str) -> bool:
-        if not (self._has_option(self.override, name) or self._has_option(self.base, name)):
-            raise RuntimeError(f"rubidium: missing required option '{name}' in {where}")
-        return self.get_bool(name, False)
+    def require_bool(self, name: str) -> bool:
+        if self._has(self.override, name):
+            return bool(self.override.getboolean(name))
+        if self._has(self.base, name):
+            return bool(self.base.getboolean(name))
+        return bool(self.override.getboolean(name))
 
 
 def config_dir_from_printer(printer) -> Optional[Path]:

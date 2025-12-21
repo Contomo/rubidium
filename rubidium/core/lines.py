@@ -32,7 +32,7 @@ class LineSegment:
 class Line:
     """A full line consisting of one or more segments."""
     idx: int
-    pa_value: float
+    parameter_value: float
     start: Pt
     end: Pt
     segments: Tuple[LineSegment, ...]
@@ -146,7 +146,7 @@ class Lines:
             new_lines.append(
                 Line(
                     idx=ln.idx,
-                    pa_value=ln.pa_value,
+                    parameter_value=ln.parameter_value,
                     start=r_pt(ln.start),
                     end=r_pt(ln.end),
                     segments=tuple(new_segments),

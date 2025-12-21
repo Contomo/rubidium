@@ -26,7 +26,7 @@ def parse_speeds(raw: str) -> Dict[str, float]:
 
 
 class RubidiumPrint(RubidiumBase):
-    """Handler class for the ``RUBIDIUM_PRINT`` command."""
+    """Handler class for the RUBIDIUM_PRINT command."""
 
     cmd_help = "Stream a Rubidium pattern via virtual_sdcard (printing)"
 
@@ -130,7 +130,7 @@ class RubidiumPrint(RubidiumBase):
         z = float(lines.lines[0].start.z)
 
 
-        pa0 = float(lines.lines[0].pa_value)
+        pa0 = float(lines.lines[0].parameter_value)
 
         brim_lines: List[Line] = []
         for i in range(walls): # type: ignore
@@ -154,7 +154,7 @@ class RubidiumPrint(RubidiumBase):
             brim_lines.append(
                 Line(
                     idx=-(walls - i), # type: ignore
-                    pa_value=pa0,
+                    parameter_value=pa0,
                     start=p0,
                     end=p2,
                     segments=segs,
@@ -238,7 +238,7 @@ class RubidiumPrint(RubidiumBase):
 
             yield f"G0 X{pl.start.x + offx:.3f} Y{pl.start.y + offy:.3f} Z{pl.start.z + offz:.3f} F{fast_feed:.1f}"
 
-            yield (tuning_fmt % (pl.pa_value,))
+            yield (tuning_fmt % (pl.parameter_value,))
             yield "G90"
 
             for seg in pl.segments:

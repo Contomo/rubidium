@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any, Dict
-
+from typing import Any, Dict, Callable, Optional
+from dataclasses import dataclass
 from ..core.base import RubidiumBase
 from ..core.lines import Lines, Line, Pt  # type: ignore
 from ..analysis.graphing import RubidiumPaths
@@ -24,7 +24,7 @@ class RubidiumScan(RubidiumBase):
             provider_name="Rubidium scan",
         )
         self.scan_speed  = self._get("scan_speed", self.v_travel, method="getfloat", above=0.0)
-        self.scan_buffer = self._get("scan_buffer", 0.0, method="getfloat", minval=0.0)
+        self.scan_buffer = self._get("scan_buffer", 0.0, method="getfloat", minval=0.0) # TODO: if 0 auto calc this from toolhead accel at runtime
         self.graphing    = RubidiumPaths(self.printer, base_section=self.base_section, section=self.section)
         self.video       = VideoInput(self.printer, base_section=self.base_section, section=self.section)
         self._outdir     = Path(self.graphing.dirs.scan)
@@ -66,11 +66,13 @@ class RubidiumScan(RubidiumBase):
         self.video.start_session(self._outdir)
 
         travel_speed = float(s.get("travel_speed", r.v_travel))
-        scan_speed = float(s.get("scan_speed", r.v_travel))
+        scan_speed  = float(s.get("scan_speed", r.v_travel))
         scan_buffer = float(s.get("scan_buffer", 0.0))
         travel_f = travel_speed * 60.0
         scan_f = scan_speed * 60.0
+
         offx, offy, offz = self.offset_x, self.offset_y, self.offset_z
+
         # Iterate over lines
         for i, pl in enumerate(lines):
             self.progress = i / max(1, n)
@@ -84,10 +86,12 @@ class RubidiumScan(RubidiumBase):
             ux = dx / dist
             uy = dy / dist
             buf = min(scan_buffer, 0.49 * dist)
-            bsx = sx + ux * buf
-            bsy = sy + uy * buf
-            bex = ex - ux * buf
-            bey = ey - uy * buf
+
+            bsx = sx - ux * buf
+            bsy = sy - uy * buf
+            bex = ex + ux * buf
+            bey = ey + uy * buf
+
             scan_ctx = r._tmpl_ctx(
                 mode="scan",
                 s=s,
@@ -95,10 +99,11 @@ class RubidiumScan(RubidiumBase):
                 scan={
                     "buf_start": Pt(bsx, bsy, sz),
                     "buf_end":   Pt(bex, bey, sz),
-                    "raw_start": Pt(sx, sy, sz),
-                    "raw_end":   Pt(ex, ey, sz),
+                    "raw_start": Pt(sx,  sy,  sz),
+                    "raw_end":   Pt(ex,  ey,  sz),
                 },
             )
+
             for ln in r._render_template_lines(
                 self.templates.before_line, 
                 scan_ctx, 
@@ -107,9 +112,34 @@ class RubidiumScan(RubidiumBase):
                 yield ln
 
             yield f"G0 X{bsx:.3f} Y{bsy:.3f} Z{sz:.3f} F{travel_f:.1f}"
-            yield f"RUBIDIUM_VIDEO_MARK KEY=line_{getattr(pl, 'idx', i):03d} KIND=start IDX={getattr(pl, 'idx', i)} PA={getattr(pl, 'pa_value', 0.0):.9f}"
+
+            yield f"G1 X{sx:.3f} Y{sy:.3f} F{scan_f:.1f}"
+            line_idx = int(getattr(pl, 'idx', i))
+            line_key = f"line_{line_idx:03d}"
+            self.video.mark(
+                kind="start",
+                idx=line_idx,
+                key=line_key,
+                meta={
+                    "parameter_value": float(pl.parameter_value),
+                    "raw_start": [sx, sy, sz],
+                    "raw_end": [ex, ey, sz],
+                    "buf_start": [bsx, bsy, sz],
+                    "buf_end": [bex, bey, sz],
+                },
+            )
+
+            yield f"G1 X{ex:.3f} Y{ey:.3f} F{scan_f:.1f}"
+            self.video.mark(
+                kind="end",
+                idx=line_idx,
+                key=line_key,
+                meta={
+                    "parameter_value": float(pl.parameter_value),
+                },
+            )
+
             yield f"G1 X{bex:.3f} Y{bey:.3f} F{scan_f:.1f}"
-            yield f"RUBIDIUM_VIDEO_MARK KEY=line_{getattr(pl, 'idx', i):03d} KIND=end IDX={getattr(pl, 'idx', i)} PA={getattr(pl, 'pa_value', 0.0):.9f}"
 
             for ln in r._render_template_lines(
                 self.templates.after_line, 
