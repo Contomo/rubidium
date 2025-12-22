@@ -1,6 +1,4 @@
-
 # rubidium/modes/scan_mode.py
-
 from __future__ import annotations
 
 import math
@@ -36,6 +34,7 @@ class RubidiumScan(RubidiumBase):
 
     def _extra_settings_from(self, gcmd) -> Dict[str, Any]:
         return {
+            "video_latency_ms": gcmd.get_float("VIDEO_LATENCY_MS", None),
             "scan_speed":  gcmd.get_float("SCAN_SPEED",  self.scan_speed, above=0.0),
             "scan_buffer": gcmd.get_float("SCAN_BUFFER", self.scan_buffer, minval=0.0),
         }
@@ -62,6 +61,8 @@ class RubidiumScan(RubidiumBase):
         ):
             yield ln
         yield "G90"
+        if getattr(s, 'video_latency_ms', None) is not None:
+            self.video.set_latency_offset(s["video_latency_ms"])
 
         self.video.start_session(self._outdir)
 

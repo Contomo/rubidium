@@ -1,7 +1,4 @@
-
 # rubidium/video/video_input.py
-
-
 from __future__ import annotations
 
 
@@ -108,8 +105,6 @@ class PlannerCallback:
         th.register_lookahead_callback(lookahead_cb)
 
 
-# --------------------------- Video Input ---------------------------
-
 class VideoInput:
     """Manage video capture by delegating heavy tasks to VideoEngine"""
 
@@ -160,8 +155,8 @@ class VideoInput:
         self.engine.start()
 
         self._session_start_pt: Optional[float] = None
-        self._active_marks: Dict[str, float] = {} # Key -> Start timestamp (relative)
-        
+        self._active_marks: Dict[str, float] = {} 
+        self._old_latency_s: Optional[float] = None
         self._current_outdir: Optional[Path] = None
 
     def _pick_input_kind(self) -> str:
@@ -171,10 +166,8 @@ class VideoInput:
         return kind
 
     def _build_base_ffmpeg_cmd(self) -> list[str]:
-        """Constructs the input arguments for the recording session"""
         kind = self._pick_input_kind()
         cmd = [self.ffmpeg_bin, "-nostdin", "-hide_banner", "-loglevel", "error", "-y"]
-        
         cmd += shlex.split(self.video_extra_args[0])
 
         if kind == "url":
@@ -208,7 +201,15 @@ class VideoInput:
         cmd += shlex.split(out_args)
         return cmd
 
-    # --------------------------- Commands ---------------------------
+    def set_latency_offset(self, offset: Optional[float]):
+        if offset is None: return
+        if self._old_latency_s is None:
+            self._old_latency_s = self.latency_s
+        self.latency_s = offset
+
+    def reset_latency_offset(self):
+        if self._old_latency_s is None: return
+        self.latency_s = self._old_latency_s
 
     def start_session(self, outdir: Path) -> None:
         """Prepare session paths and schedule recording start"""
@@ -223,73 +224,60 @@ class VideoInput:
             pass 
 
         self._current_outdir = session_dir
-        
         video_path = session_dir / f"{self.video_session_filename}.dump.{self.video_dump_container}"
         log_path = session_dir / f"{self.video_session_filename}.record.log"
         json_path = session_dir / f"{self.video_session_filename}.json"
 
-        # Build command args
         cmd_args = self._build_base_ffmpeg_cmd()
         cmd_args.append(str(video_path))
 
         def _start_cb(eventtime: float, print_time: float, _: Any) -> None:
             self._session_start_pt = print_time
             self._active_marks.clear()
-
+            
             self.gcode.respond_info(f"rubidium_video: starting recording -> {video_path.name}")
-
+            
             self.engine.submit(CmdStartRecording(
                 session_id=sid,
                 output_path=video_path,
                 cmd_args=cmd_args,
                 log_path=log_path,
-                json_path=json_path
+                json_path=json_path,
+                start_eventtime=eventtime
             ))
 
         self._planner_cb.schedule_cb(_start_cb, payload=None)
 
     def stop_session(self, *, finalize: bool) -> None:
-        """Schedule stop and optional processing"""
-        
         def _end_cb(eventtime: float, print_time: float, _: Any) -> None:
             self.gcode.respond_info("rubidium_video: stopping recording")
-            
             self.engine.submit(CmdStopRecording(finalize=finalize))
             self._session_start_pt = None
             self._active_marks.clear()
+            self.reset_latency_offset()
 
         self._planner_cb.schedule_cb(_end_cb, payload=None)
 
     def mark(self, *, kind: str, idx: int, meta: Optional[dict[str, Any]] = None, key: Optional[str] = None) -> None:
-        """Schedule a motion-timed mark and potential cut"""
-        
         kind_l = (kind or "").strip().lower()
         idx_i = int(idx)
         key_s = str(key) if key is not None else f"line_{idx_i:03d}"
         meta_d = _json_sanitize(meta or {})
 
         payload = {
-            "key": key_s,
-            "kind": kind_l,
-            "idx": idx_i,
-            "meta": meta_d
+            "key": key_s, "kind": kind_l, "idx": idx_i, "meta": meta_d
         }
 
         def _mark_cb(eventtime: float, print_time: float, pl: dict[str, Any]) -> None:
-            if self._session_start_pt is None:
-                return
+            if self._session_start_pt is None: return
 
-            t_s = (print_time - self._session_start_pt) + self.latency_s
+            t_s = (print_time - self._session_start_pt) - self.latency_s
             t_s = max(0.0, t_s) 
 
             mark_data = {
-                "key": pl["key"],
-                "kind": pl["kind"],
-                "idx": pl["idx"],
-                "t_s": t_s,
-                "meta": pl["meta"],
-                "eventtime": eventtime,
-                "print_time": print_time
+                "key": pl["key"], "kind": pl["kind"], "idx": pl["idx"],
+                "t_s": t_s, "meta": pl["meta"],
+                "eventtime": eventtime, "print_time": print_time
             }
             self.engine.submit(CmdLogMark(mark_data))
 
@@ -303,7 +291,6 @@ class VideoInput:
                     
                     out_name = f"{self.video_cut_filename}_{pl['idx']:03d}.mp4"
                     out_path = self._current_outdir / out_name
-                    
                     dump_path = self._current_outdir / f"{self.video_session_filename}.dump.{self.video_dump_container}"
 
                     self.engine.submit(CmdQueueCut(
@@ -313,12 +300,7 @@ class VideoInput:
                         duration_s=duration,
                         cmd_args_in=self.video_cut_extra_args[0],
                         cmd_args_out=self.video_cut_extra_args[1],
-                        clip_metadata={
-                            "key": pl["key"],
-                            "idx": pl["idx"],
-                            "start": start_ts,
-                            "end": t_s
-                        }
+                        clip_metadata={"key": pl["key"], "idx": pl["idx"], "start": start_ts, "end": t_s}
                     ))
 
         self._planner_cb.schedule_cb(_mark_cb, payload=payload)

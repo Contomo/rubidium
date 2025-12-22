@@ -1,19 +1,15 @@
-
 # rubidium/video/video_engine.py
-
 from __future__ import annotations
-
 
 import json
 import logging
 import os
 import queue
 import shlex
-import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, List, Dict
 
@@ -25,6 +21,7 @@ class CmdStartRecording:
     cmd_args: List[str]
     log_path: Path
     json_path: Path
+    start_eventtime: float  # reactor monotonic
 
 
 @dataclass
@@ -54,13 +51,12 @@ class VideoEngine(threading.Thread):
         self._queue = queue.Queue()
         self._proc: Optional[subprocess.Popen] = None
         
-        # State
         self.session_data: Dict[str, Any] = {}
         self.marks_list: List[Dict[str, Any]] = []
         self.clips_list: List[Dict[str, Any]] = []
         self.pending_cuts: List[CmdQueueCut] = []
-        
-        # Current paths
+
+        self._startup_lag: float = 0.0
         self.json_path: Optional[Path] = None
         self.ffmpeg_path: str = "ffmpeg"
         self.nice_level: int = 0
@@ -70,11 +66,9 @@ class VideoEngine(threading.Thread):
         self.nice_level = nice_level
 
     def submit(self, cmd: Any):
-        """Called by Main Thread to schedule work"""
         self._queue.put(cmd)
 
     def run(self):
-        """Background Thread"""
         while True:
             try:
                 cmd = self._queue.get()
@@ -92,9 +86,8 @@ class VideoEngine(threading.Thread):
             self._do_mark(cmd)
         elif isinstance(cmd, CmdQueueCut):
             self.pending_cuts.append(cmd)
-
+        
         self._flush_json()
-
 
     def _do_start(self, cmd: CmdStartRecording):
         if self._proc is not None:
@@ -106,7 +99,8 @@ class VideoEngine(threading.Thread):
             "id": cmd.session_id,
             "file": str(cmd.output_path),
             "start_time": time.time(),
-            "active": True
+            "active": True,
+            "startup_lag": 0.0
         }
         self.marks_list = []
         self.clips_list = []
@@ -118,6 +112,8 @@ class VideoEngine(threading.Thread):
             except Exception:
                 log_f = open(os.devnull, "w")
 
+            spawn_start_mono = time.monotonic()
+            
             self._proc = subprocess.Popen(
                 cmd.cmd_args,
                 stdout=log_f,
@@ -126,9 +122,37 @@ class VideoEngine(threading.Thread):
                 close_fds=True
             )
             self.session_data["pid"] = self._proc.pid
+
         except Exception as e:
             logging.error(f"rubidium_video: failed to start ffmpeg: {e}")
             self.session_data["error"] = str(e)
+            return
+
+        logging.info("rubidium_video: waiting for video file to appear...")
+        
+        real_start_mono = None
+
+        for _ in range(200):
+            try:
+                if cmd.output_path.exists() and cmd.output_path.stat().st_size > 1024:
+                    # File exists and has some data (header prob) TODO: check → 1kb may be too low if it writes header before frames arrive?
+                    real_start_mono = time.monotonic()
+                    break
+            except Exception:
+                pass
+            time.sleep(0.025) # TODO: wait in frame intervals perhaps?
+            
+            if self._proc.poll() is not None:
+                break
+        
+        if real_start_mono is None:
+            logging.warning("rubidium_video: timed out waiting for file creation, sync might be off")
+            real_start_mono = spawn_start_mono
+
+        self._startup_lag = real_start_mono - cmd.start_eventtime
+        self.session_data["startup_lag"] = self._startup_lag
+        
+        logging.info(f"rubidium_video: sync established. startup_lag={self._startup_lag:.4f}s")
 
     def _do_mark(self, cmd: CmdLogMark):
         self.marks_list.append(cmd.mark_data)
@@ -162,13 +186,13 @@ class VideoEngine(threading.Thread):
             with open(self.json_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, default=str)
         except Exception:
-            pass # logging here might spam
+            pass 
 
     def _run_post_processing(self):
         if not self.pending_cuts:
             return
 
-        try:
+        try: # nice
             os.nice(self.nice_level)
         except Exception:
             pass
@@ -186,12 +210,14 @@ class VideoEngine(threading.Thread):
     def _exec_ffmpeg_cut(self, job: CmdQueueCut) -> bool:
         """Directly runs ffmpeg to cut the clip"""
 
+        adjusted_start = max(0.0, job.start_s - self._startup_lag)
+        
         cmd = [self.ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error"]
         
         if job.cmd_args_in:
             cmd += shlex.split(job.cmd_args_in)
             
-        cmd += ["-ss", f"{job.start_s:.4f}"]
+        cmd += ["-ss", f"{adjusted_start:.4f}"]
         cmd += ["-i", str(job.input_path)]
         cmd += ["-t", f"{job.duration_s:.4f}"]
         
