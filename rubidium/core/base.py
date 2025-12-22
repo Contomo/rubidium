@@ -1,13 +1,13 @@
+
 """Shared base classes and utilities for Rubidium"""
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple, Literal
+
+from typing import Any, Dict, Optional, Tuple, Literal, List
+
 
 from .lines import Lines, Line, LineSegment, Pt
-
-# Constants used when defining exclude objects
-EXCLUDE_OBJECT_MARGIN: float = 1.0
 
 
 class TemplateSet:
@@ -62,6 +62,7 @@ class RubidiumBase:
         self._run_settings: Optional[Dict[str, Any]] = None
         self._run_gcmd = None
         self._run_pattern = None
+        self._keepout_xy: Optional[List[Tuple[float, float]]] = None
         self.progress: float = 0.0
 
     # -- lifecycle ------------------------------------------------------
@@ -112,16 +113,20 @@ class RubidiumBase:
         if lines is None:
             raise gcmd.error(f"rubidium: pattern '{pattern_name}' has no built lines")
 
+        keepout_xy = pattern.get_keepout_outline_xy()
+
         self._run_pattern = pattern
         settings = self._build_settings_from(gcmd, pattern)
         lines = self._prepare_lines_for_run(
             lines,
             s=settings,
-            gcmd=gcmd
+            gcmd=gcmd,
+            keepout_xy=keepout_xy
         )
         self._ensure_within_bounds(lines, gcmd=gcmd)
         self._run_lines = lines
         self._run_settings = settings
+        self._keepout_xy = keepout_xy 
         self._run_gcmd = gcmd # wtf
         self.progress = 0.0
         self.sdcard.print_with_gcode_provider(self)  # type: ignore # perhaps not deligate this to self but a subclass instantiated with all those settings instead
@@ -152,7 +157,7 @@ class RubidiumBase:
         """Hook for subclasses to add additional runtime settings."""
         return {}
 
-    def _prepare_lines_for_run(self, lines: Lines, *, s: Dict[str, Any], gcmd) -> Lines:
+    def _prepare_lines_for_run(self, lines: Lines, *, s: Dict[str, Any], gcmd, keepout_xy=None) -> Lines:
         """Hook for subclasses to add/modify geometry for this run."""
         return lines
 

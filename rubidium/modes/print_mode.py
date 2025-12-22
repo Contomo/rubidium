@@ -8,6 +8,10 @@ from ..core.base import RubidiumBase
 from ..core.lines import Lines, LineSegment, Line, Pt  # type: ignore
 from ..patterns.patterns import RubidiumPatternObject
 
+# Constants used when defining exclude objects
+EXCLUDE_OBJECT_MARGIN: float = 1.0
+
+
 def _tokenize(raw: str) -> List[str]:
     return str(raw).translate(str.maketrans("=:,", "   ")).split()
 
@@ -99,7 +103,7 @@ class RubidiumPrint(RubidiumBase):
 
         return s
 
-    def _prepare_lines_for_run(self, lines: Lines, *, s: Dict[str, Any], gcmd) -> Lines:
+    def _prepare_lines_for_run(self, lines: Lines, *, s: Dict[str, Any], gcmd, keepout_xy=None) -> Lines:
         """Add a rectangular multi wall brim around the pattern."""
         if not lines.lines:
             return lines
@@ -119,7 +123,10 @@ class RubidiumPrint(RubidiumBase):
 
         sep = line_w * max(0.0, 1.0 - overlap_pct / 100.0)
 
-        outline, _ = lines.outline_and_center_xy()
+        if keepout_xy is not None:
+            outline = keepout_xy
+        else:
+            outline, _ = lines.outline_and_center_xy()
         if not outline:
             return lines
 
@@ -164,15 +171,40 @@ class RubidiumPrint(RubidiumBase):
         return Lines(tuple(brim_lines) + lines.lines)
 
     def define_exclude_object(self, lines: Lines) -> str:
-        """Return an EXCLUDE_OBJECT_DEFINE command for the current lines."""
         if self.printer.lookup_object("exclude_object", None) is None:
             return ""
-        poly_pts, (cx, cy) = lines.outline_and_center_xy()
+
+        poly_pts, _ = lines.outline_and_center_xy()
         if not poly_pts:
             return ""
-        poly_pts.reverse()
-        poly = "[" + ",".join(f"[{x:.3f},{y:.3f}]" for x, y in poly_pts) + "]"
+
+        xs = [p[0] for p in poly_pts]
+        ys = [p[1] for p in poly_pts]
+        minx, maxx = min(xs), max(xs)
+        miny, maxy = min(ys), max(ys)
+
+        ko = self._keepout_xy
+        if ko:
+            kxs = [p[0] for p in ko]
+            kys = [p[1] for p in ko]
+            if kxs and kys:
+                minx = min(minx, min(kxs))
+                maxx = max(maxx, max(kxs))
+                miny = min(miny, min(kys))
+                maxy = max(maxy, max(kys))
+
+        m = float(EXCLUDE_OBJECT_MARGIN)
+        minx -= m; maxx += m
+        miny -= m; maxy += m
+
+        cx = (minx + maxx) * 0.5
+        cy = (miny + maxy) * 0.5
+
+        rect = [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)]
+        rect.reverse()
+        poly = "[" + ",".join(f"[{x:.3f},{y:.3f}]" for x, y in rect) + "]"
         return f"EXCLUDE_OBJECT_DEFINE NAME=Pattern CENTER={cx:.3f},{cy:.3f} POLYGON={poly}"
+
 
     def _iter_run(self):
         return self._iter_print()

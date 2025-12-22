@@ -1,4 +1,5 @@
-"""Scanning mode for Rubidium"""
+
+# rubidium/modes/scan_mode.py
 
 from __future__ import annotations
 
@@ -50,14 +51,13 @@ class RubidiumScan(RubidiumBase):
 
     def _iter_scan(self):
         """Yield G-Code lines to perform a scan along the lines."""
-        r = self
         s = self._run_settings or {}
         lines = self._run_lines or Lines(tuple())
         n = len(lines.lines)
 
-        for ln in r._render_template_lines(
+        for ln in self._render_template_lines(
             self.templates.start, 
-            r._tmpl_ctx(mode="scan", s=s), 
+            self._tmpl_ctx(mode="scan", s=s), 
             gcmd=self._run_gcmd
         ):
             yield ln
@@ -65,8 +65,8 @@ class RubidiumScan(RubidiumBase):
 
         self.video.start_session(self._outdir)
 
-        travel_speed = float(s.get("travel_speed", r.v_travel))
-        scan_speed  = float(s.get("scan_speed", r.v_travel))
+        travel_speed = float(s.get("travel_speed", self.v_travel))
+        scan_speed  = float(s.get("scan_speed", 10.0))
         scan_buffer = float(s.get("scan_buffer", 0.0))
         travel_f = travel_speed * 60.0
         scan_f = scan_speed * 60.0
@@ -92,7 +92,7 @@ class RubidiumScan(RubidiumBase):
             bex = ex + ux * buf
             bey = ey + uy * buf
 
-            scan_ctx = r._tmpl_ctx(
+            scan_ctx = self._tmpl_ctx(
                 mode="scan",
                 s=s,
                 line=pl,
@@ -104,7 +104,7 @@ class RubidiumScan(RubidiumBase):
                 },
             )
 
-            for ln in r._render_template_lines(
+            for ln in self._render_template_lines(
                 self.templates.before_line, 
                 scan_ctx, 
                 gcmd=self._run_gcmd
@@ -141,7 +141,7 @@ class RubidiumScan(RubidiumBase):
 
             yield f"G1 X{bex:.3f} Y{bey:.3f} F{scan_f:.1f}"
 
-            for ln in r._render_template_lines(
+            for ln in self._render_template_lines(
                 self.templates.after_line, 
                 scan_ctx, 
                 gcmd=self._run_gcmd
@@ -153,9 +153,9 @@ class RubidiumScan(RubidiumBase):
         # Stop recording and cut per-line clips
         self.video.stop_session(finalize=True)
 
-        for ln in r._render_template_lines(
+        for ln in self._render_template_lines(
             self.templates.end, 
-            r._tmpl_ctx(mode="scan", s=s), 
+            self._tmpl_ctx(mode="scan", s=s), 
             gcmd=self._run_gcmd
         ):
             yield ln

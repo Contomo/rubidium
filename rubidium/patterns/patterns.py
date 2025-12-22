@@ -122,9 +122,12 @@ def _kin_bed_center(printer) -> Dict[str, float]:
 
 class PatternType:
     def __init__(self, name: str, *, options: Tuple[OptSpec, ...]) -> None:
-        self.name = name
-        self.options = options
+        self.name: str = name
+        self.options: Tuple[OptSpec, ...] = options
 
+    def build_keepout(self, *, settings: Dict[str, Any], segments: List[Tuple[str, float]]) -> Optional[Lines]:
+        raise NotImplementedError
+    
     def build(self, *, settings: Dict[str, Any], segments: List[Tuple[str, float]]) -> Lines:
         raise NotImplementedError
 
@@ -163,9 +166,13 @@ class LinesPatternType(PatternType):
                 x0 = x1
 
             lines_list.append(Line(idx=idx, parameter_value=pa, start=start_pt, end=end_pt, segments=tuple(segs)))
-
         return Lines(tuple(lines_list))
-
+    
+    def build_keepout(self, *, settings: Dict[str, Any], segments: List[Tuple[str, float]]) -> Lines:
+        s2 = dict(settings)
+        s2["param_count"] = int(settings["param_count"]) + 2
+        s2["origin_y"] = float(settings["origin_y"]) - float(settings["line_spacing"])
+        return self.build(settings=s2, segments=segments)
 
 def _bed_center_x(ctx: Dict[str, Any]) -> float: # TODO lambda this
     return float(ctx.get("bed_center_x", 0.0))
@@ -340,6 +347,15 @@ class RubidiumPatternObject:
             self.segments = parse_segments(raw_seg)
 
         self.rebuild()
+
+    def get_keepout_outline_xy(self) -> Optional[List[Tuple[float, float]]]:
+        ko = self.ptype.build_keepout(settings=self.settings, segments=self.segments)
+        if ko is None or not ko.lines:
+            return None
+        poly, _ = ko.outline_and_center_xy()
+        if not poly:
+            return None
+        return poly
 
     def inherit_from(self, other: "RubidiumPatternObject") -> None:
         """Fill missing settings/segments from another pattern."""
