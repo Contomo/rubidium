@@ -69,18 +69,6 @@ class PlannerCallback:
 
         th.register_lookahead_callback(lookahead_cb)
 
-
-@dataclass(slots=True)
-class VideoMark:
-    key: str
-    kind: str  # "start" | "end"
-    idx: int
-    t_s: float
-    meta: dict[str, Any]
-    eventtime: float
-    print_time: float
-
-
 def _is_url(text: str) -> bool:
     if text.startswith(("http://", "https://", "rtsp://", "rtsps://")):
         return True
@@ -143,6 +131,26 @@ def _norm_video_size(res: str) -> Optional[str]:
         return None
     return f"{w}x{h}"
 
+def _sh_quote(s: str) -> str:
+    """Return a POSIX-shell-safe single-quoted string."""
+    s = str(s)
+    return "'" + s.replace("'", "'\"'\"'") + "'"
+
+
+
+def _sh_join(cmd: list[str]) -> str:
+    return " ".join(_sh_quote(a) for a in cmd)
+
+
+@dataclass(slots=True)
+class VideoMark:
+    key: str
+    kind: str  # "start" | "end"
+    idx: int
+    t_s: float
+    meta: dict[str, Any]
+    eventtime: float
+    print_time: float
 
 class VideoInput:
     """Manage a video capture session and motion-timed markers"""
@@ -160,11 +168,12 @@ class VideoInput:
         self.ffmpeg = cfg.get_str("ffmpeg", "ffmpeg").strip() or "ffmpeg"
         self.input_kind = cfg.get_str("video_input_kind", "auto").lower().strip()
 
-        self.video_latency_ms = cfg.get_float("video_latency_ms", 0.0, minval=0.0)
+        # Allow negative offsets to handle cases where marks effectively lag the visible motion.
+        self.video_latency_ms = cfg.get_float("video_latency_ms", 0.0)
 
         self.video_extra_args: Tuple[str, str] = (
-            cfg.get_str("video_extra_input_args", ""),
-            cfg.get_str("video_extra_output_args", ""),
+            cfg.get_str("video_extra_input_args", "").strip(),
+            cfg.get_str("video_extra_output_args", "").strip(),
         )
 
         if not _is_url(self.source):
@@ -185,8 +194,16 @@ class VideoInput:
         )
         self.video_cut_filename = cfg.get_str("video_cut_filename", "rubidium_cut")
         self.video_cut_extra_args: Tuple[str, str] = (
-            cfg.get_str("video_cut_extra_input_args", ""),
-            cfg.get_str("video_cut_extra_output_args", "-c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -movflags +faststart -an"),
+            cfg.get_str("video_cut_extra_input_args", "").strip(),
+            cfg.get_str("video_cut_extra_output_args", "").strip(),
+        )
+
+        # postprocess (conversion/cutting) runs in a low-priority child process
+        self.video_dump_container = cfg.get_str("video_dump_container", "mkv").strip().lower() or "mkv"
+        self.video_postprocess_nice = cfg.get_int("video_postprocess_nice", 15, minval=0, maxval=19)
+        self.video_convert_extra_args: Tuple[str, str] = (
+            cfg.get_str("video_convert_extra_input_args", "").strip(),
+            cfg.get_str("video_convert_extra_output_args", "").strip(),
         )
 
         # session state
@@ -195,12 +212,20 @@ class VideoInput:
         self._outdir: Optional[Path] = None
         self._session_started_rt: Optional[float] = None
         self._session_id: Optional[str] = None
-        self._video_path: Optional[Path] = None
+        self._session_paths: Optional[dict[str, Path]] = None
         self._log_path: Optional[Path] = None
         self._json_path: Optional[Path] = None
         self._ffmpeg_cmd: Optional[list[str]] = None
         self._marks: list[VideoMark] = []
         self._clips: list[dict[str, Any]] = []
+
+        self._video_dump_path: Optional[Path] = None
+        self._video_mp4_path: Optional[Path] = None
+        self._postproc: Optional[subprocess.Popen] = None
+        self._postproc_log_path: Optional[Path] = None
+        self._postproc_script_path: Optional[Path] = None
+        self._postproc_cmd: Optional[list[str]] = None
+        self._logged_mark_debug: bool = False
 
         # planner-time anchors (THIS is what fixes your timing)
         self._session_start_pt: Optional[float] = None
@@ -254,12 +279,12 @@ class VideoInput:
         if vf_parts:
             cmd += ["-vf", ",".join(vf_parts)]
 
-        out_args = (self.video_extra_args[1] or "").strip()
+        out_args = self.video_extra_args[1]
         if not out_args:
             if kind == "url":
-                out_args = "-an -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p -movflags +faststart"
+                out_args = f"-an -c copy"
             else:
-                out_args = "-an -c:v libx264 -preset ultrafast -crf 18 -pix_fmt yuv420p"
+                out_args = f"-an -c:v libx264 -preset ultrafast -crf 18 -pix_fmt yuv420p"
         cmd += shlex.split(out_args)
         cmd += [str(out_video)]
         return cmd
@@ -272,11 +297,11 @@ class VideoInput:
             if p.poll() is None:
                 p.send_signal(signal.SIGINT)
                 try:
-                    p.wait(timeout=2.0)
+                    p.wait(timeout=10.0)
                 except Exception:
                     p.terminate()
                     try:
-                        p.wait(timeout=2.0)
+                        p.wait(timeout=5.0)
                     except Exception:
                         p.kill()
         except Exception:
@@ -289,30 +314,39 @@ class VideoInput:
             self._respond_error("start_session called while ffmpeg is still running")
             return
 
-        outdir = Path(outdir)
-        outdir.mkdir(parents=True, exist_ok=True)
-
-        ts = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        ts = time.strftime("%Y-%m-%d_%H-%M", time.localtime())
         sid = f"{ts}_{os.getpid()}"
-        base = f"{self.video_session_filename}_{sid}"
-        video_path = outdir / f"{base}.mp4"
-        log_path = outdir / f"{base}.ffmpeg.log"
-        json_path = outdir / f"{base}.json"
 
-        cmd = self._build_record_cmd(video_path)
+        session_dir = Path(outdir) / f"recording_{sid}"
+        session_dir.mkdir(parents=True, exist_ok=True)
 
-        # reset state
+        dump_ext = self.video_dump_container
+        video_dump_path = session_dir / f"{self.video_session_filename}.dump.{dump_ext}"
+        video_mp4_path  = session_dir / f"{self.video_session_filename}.mp4"
+        log_path        = session_dir / f"{self.video_session_filename}.record.ffmpeg.log"
+        json_path       = session_dir / f"{self.video_session_filename}.json"
+        post_log_path   = session_dir / f"{self.video_session_filename}.postprocess.log"
+        post_sh_path    = session_dir / f"{self.video_session_filename}.postprocess.sh"
+
+        cmd = self._build_record_cmd(video_dump_path)
+
         self._marks = []
         self._clips = []
-        self._outdir = outdir
+        self._outdir = session_dir
         self._session_started_rt = float(self.reactor.monotonic())
         self._session_id = sid
-        self._video_path = video_path
+        self._video_dump_path = video_dump_path
+        self._video_mp4_path = video_mp4_path
         self._log_path = log_path
         self._json_path = json_path
+        self._postproc_log_path = post_log_path
+        self._postproc_script_path = post_sh_path
+        self._postproc = None
+        self._postproc_cmd = None
         self._ffmpeg_cmd = cmd
         self._session_start_pt = None
         self._session_end_pt = None
+        self._logged_mark_debug = False
         self._proc = None
 
         self._write_state_json()
@@ -320,6 +354,10 @@ class VideoInput:
         def _start_cb(eventtime: float, print_time: float, payload: Any) -> None:
             kin = float(self._planner_cb.get_kin_flush_delay())
             self._session_start_pt = float(print_time) + kin
+            self._respond_info(
+                "session_start_pt=%.6f print_time=%.6f kin_flush=%.6f eventtime=%.6f"
+                % (self._session_start_pt, float(print_time), kin, float(eventtime))
+            )
 
             try:
                 try:
@@ -340,7 +378,7 @@ class VideoInput:
                 return
 
             self._write_state_json()
-            self._respond_info(f"recording started -> {video_path}")
+            self._respond_info(f"recording started -> {video_dump_path}")
 
         self._planner_cb.schedule_cb(_start_cb, payload=None)
 
@@ -368,9 +406,9 @@ class VideoInput:
 
                 if finalize:
                     try:
-                        self._cut_clips()
+                        self._spawn_postprocess()
                     except Exception:
-                        self._respond_error("rubidium_video: failed cutting clips")
+                        self._respond_error("rubidium_video: failed spawning postprocess")
 
                 self._stopping = False
                 self._write_state_json()
@@ -412,6 +450,19 @@ class VideoInput:
                 self._session_start_pt = mark_pt
 
             t_s = (mark_pt - float(self._session_start_pt)) + float(pl["latency_s"])
+            if (not self._logged_mark_debug) and str(pl.get("kind")) == "start":
+                self._logged_mark_debug = True
+                self._respond_info(
+                    "mark_debug key=%s mark_pt=%.6f session_start_pt=%.6f latency=%.6f t_s=%.6f eventtime=%.6f"
+                    % (
+                        str(pl.get("key")),
+                        float(mark_pt),
+                        float(self._session_start_pt),
+                        float(pl.get("latency_s", 0.0)),
+                        float(t_s),
+                        float(eventtime),
+                    )
+                )
 
             m = VideoMark(
                 key=str(pl["key"]),
@@ -436,7 +487,13 @@ class VideoInput:
         session = {
             "id": self._session_id,
             "source": self.source,
-            "video": str(self._video_path) if self._video_path is not None else None,
+            "video_dump": str(self._video_dump_path) if self._video_dump_path is not None else None,
+            "video_mp4": str(self._video_mp4_path) if self._video_mp4_path is not None else None,
+            "video": str(self._video_mp4_path) if self._video_mp4_path is not None else (str(self._video_dump_path) if self._video_dump_path is not None else None),
+            "postprocess_nice": int(self.video_postprocess_nice),
+            "postprocess_script": str(self._postproc_script_path) if self._postproc_script_path is not None else None,
+            "postprocess_log": str(self._postproc_log_path) if self._postproc_log_path is not None else None,
+            "postprocess_cmd": list(self._postproc_cmd or []),
             "ffmpeg": self.ffmpeg,
             "ffmpeg_cmd": list(self._ffmpeg_cmd or []),
             "ffmpeg_log": str(self._log_path) if self._log_path is not None else None,
@@ -449,6 +506,13 @@ class VideoInput:
             try:
                 session["ffmpeg_pid"] = int(self._proc.pid)
                 session["ffmpeg_returncode"] = self._proc.poll()
+            except Exception:
+                pass
+
+        if self._postproc is not None:
+            try:
+                session["postprocess_pid"] = int(self._postproc.pid)
+                session["postprocess_returncode"] = self._postproc.poll()
             except Exception:
                 pass
 
@@ -476,14 +540,186 @@ class VideoInput:
         except Exception:
             logging.exception("rubidium_video: failed writing json state")
 
-    # --------------------------- cutting
+    
+    # --------------------------- postprocess (convert + cut)
+    def _build_convert_cmd(self, in_path: Path, out_path: Path) -> list[str]:
+        cmd: list[str] = [
+            self.ffmpeg,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+        ]
+        cmd += shlex.split(self.video_convert_extra_args[0].strip())
+        cmd += ["-i", str(in_path)]
+
+        out_args = self.video_convert_extra_args[1].strip()
+        if not out_args:
+            # Default to a cheap remux if possible. If the input isn't mp4-compatible,
+            # users can override this via video_convert_extra_output_args.
+            out_args = "-an -c copy"
+        cmd += shlex.split(out_args)
+        cmd += [str(out_path)]
+        return cmd
+
+    def _build_cut_cmd(
+        self,
+        in_path: Path,
+        out_path: Path,
+        *,
+        start_s: float,
+        dur_s: float,
+    ) -> list[str]:
+        cmd: list[str] = [
+            self.ffmpeg,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+        ]
+        cmd += shlex.split(self.video_cut_extra_args[0].strip())
+        cmd += ["-ss", f"{float(start_s):.6f}", "-i", str(in_path), "-t", f"{float(dur_s):.6f}"]
+
+        out_args = self.video_cut_extra_args[1].strip()
+        if not out_args:
+            # Default to a sane h264 encode for accurate cuts.
+            out_args = "-an -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p"
+        cmd += shlex.split(out_args)
+        cmd += [str(out_path)]
+        return cmd
+
+    def _spawn_postprocess(self) -> None:
+        if self._outdir is None or self._video_dump_path is None or self._video_mp4_path is None:
+            return
+        if self._postproc is not None and self._postproc.poll() is None:
+            self._respond_error("postprocess already running, skipping spawn")
+            return
+
+        if not self._marks:
+            self._respond_error("no marks recorded, skipping postprocess")
+            return
+
+        pending: dict[str, VideoMark] = {}
+        segments: list[tuple[VideoMark, VideoMark]] = []
+        for m in self._marks:
+            if m.kind == "start":
+                pending[m.key] = m
+            elif m.kind == "end":
+                sm = pending.pop(m.key, None)
+                if sm is not None:
+                    segments.append((sm, m))
+
+        if not segments:
+            self._respond_error("no complete start/end pairs, skipping postprocess")
+            return
+
+        script_path = self._postproc_script_path or (self._outdir / f"{self.video_session_filename}.postprocess.sh")
+        log_path = self._postproc_log_path or (self._outdir / f"{self.video_session_filename}.postprocess.log")
+
+        convert_cmd = self._build_convert_cmd(self._video_dump_path, self._video_mp4_path)
+
+        self._clips = []
+        cut_cmds: list[tuple[int, str, list[str]]] = []
+        for sm, em in segments:
+            start_s = max(0.0, float(sm.t_s))
+            end_s = max(start_s, float(em.t_s))
+            dur_s = max(0.0, end_s - start_s)
+
+            out_name = f"{self.video_cut_filename}_{int(sm.idx):03d}.mp4"
+            out_path = self._outdir / out_name
+
+            cut_cmd = self._build_cut_cmd(self._video_mp4_path, out_path, start_s=start_s, dur_s=dur_s)
+            cut_cmds.append((int(sm.idx), str(sm.key), cut_cmd))
+
+            self._clips.append(
+                {
+                    "key": sm.key,
+                    "idx": sm.idx,
+                    "start": start_s,
+                    "end": end_s,
+                    "file": str(out_path),
+                    "ok": None,
+                }
+            )
+
+        sh_lines: list[str] = []
+        sh_lines.append("#!/bin/sh")
+        sh_lines.append("set -u")
+        sh_lines.append("")
+        sh_lines.append(f"echo {_sh_quote('[rubidium_video] postprocess starting')}")
+        sh_lines.append(f"echo {_sh_quote(f'[rubidium_video] nice={int(self.video_postprocess_nice)}')}")
+        sh_lines.append("")
+
+        sh_lines.append(f"echo {_sh_quote('[rubidium_video] convert session -> mp4')}")
+        sh_lines.append(f"if ! {_sh_join(convert_cmd)}; then")
+        sh_lines.append(f"  echo {_sh_quote('[rubidium_video] convert FAILED')}")
+        sh_lines.append("  exit 1")
+        sh_lines.append("fi")
+        sh_lines.append("")
+
+        for idx_i, key_s, cmd in cut_cmds:
+            sh_lines.append(f"echo {_sh_quote(f'[rubidium_video] cut idx={idx_i:03d} key={key_s}')}")
+            sh_lines.append(f"{_sh_join(cmd)} || echo {_sh_quote(f'[rubidium_video] cut FAILED idx={idx_i:03d} key={key_s}')}")
+            sh_lines.append("")
+
+        sh_lines.append(f"echo {_sh_quote('[rubidium_video] postprocess done')}")
+
+        try:
+            script_path.write_text("\n".join(sh_lines) + "\n", encoding="utf-8")
+            try:
+                os.chmod(str(script_path), 0o755)
+            except Exception:
+                pass
+        except Exception as e:
+            self._respond_error(f"failed writing postprocess script: {e}")
+            return
+
+        # Spawn a detached, low-priority child process.
+        try:
+            try:
+                log_f = open(log_path, "w", encoding="utf-8")
+            except Exception:
+                log_f = open(os.devnull, "w")
+
+            def _preexec() -> None:
+                try:
+                    os.setsid()
+                except Exception:
+                    pass
+                try:
+                    os.nice(int(self.video_postprocess_nice))
+                except Exception:
+                    pass
+
+            self._postproc_cmd = [str(script_path)]
+            self._postproc = subprocess.Popen(
+                [str(script_path)],
+                cwd=str(self._outdir),
+                stdout=log_f,
+                stderr=log_f,
+                text=True,
+                preexec_fn=_preexec,
+                close_fds=True,
+            )
+        except Exception as e:
+            self._postproc = None
+            self._respond_error(f"failed to spawn postprocess: {e}")
+            self._write_state_json()
+            return
+
+        self._respond_info(f"postprocess spawned (nice={int(self.video_postprocess_nice)}) -> {script_path}")
+        self._write_state_json()
+
+# --------------------------- cutting
     def _run_ffmpeg(self, cmd: list[str]) -> tuple[int, str]:
         p = subprocess.run(cmd, capture_output=True, text=True)
         out = (p.stdout or "") + ("\n" + p.stderr if p.stderr else "")
         return int(p.returncode), out.strip()
 
     def _cut_clips(self) -> None:
-        if self._video_path is None or self._outdir is None:
+        if self._video_mp4_path is None or self._outdir is None:
             return
         if not self._marks:
             self._respond_error("no marks recorded, skipping clip cut")
@@ -519,7 +755,7 @@ class VideoInput:
                 "-y",
             ]
             cmd += shlex.split(self.video_cut_extra_args[0].strip())
-            cmd += ["-ss", f"{start_s:.6f}", "-i", str(self._video_path), "-t", f"{max(0.0, end_s - start_s):.6f}"]
+            cmd += ["-ss", f"{start_s:.6f}", "-i", str(self._video_mp4_path), "-t", f"{max(0.0, end_s - start_s):.6f}"]
 
             cmd += shlex.split(self.video_cut_extra_args[1].strip())
             cmd += [str(out_path)]

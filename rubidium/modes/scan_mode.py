@@ -23,7 +23,7 @@ class RubidiumScan(RubidiumBase):
             register_name="SCAN",
             provider_name="Rubidium scan",
         )
-        self.scan_speed  = self._get("scan_speed", self.v_travel, method="getfloat", above=0.0)
+        self.scan_speed  = self._get("scan_speed", 10.0, method="getfloat", above=0.0)
         self.scan_buffer = self._get("scan_buffer", 0.0, method="getfloat", minval=0.0) # TODO: if 0 auto calc this from toolhead accel at runtime
         self.graphing    = RubidiumPaths(self.printer, base_section=self.base_section, section=self.section)
         self.video       = VideoInput(self.printer, base_section=self.base_section, section=self.section)

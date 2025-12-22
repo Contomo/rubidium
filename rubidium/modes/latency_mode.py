@@ -272,7 +272,6 @@ class RubidiumLatency:
 
         self.video_input_kind = (self.cv.get_str_opt("video_input_kind") or "auto").strip().lower()
 
-        # IMPORTANT: use the SAME defaults as VideoInput so the pipeline matches scan
         self.video_resolution = (self.cv.get_str_opt("video_resolution") or "").strip()
         self.video_framerate = self.cv.get_int("video_framerate", 25, minval=1)
 
@@ -289,9 +288,9 @@ class RubidiumLatency:
         self.warmup_frames = self.cv.get_int("latency_warmup_frames", 4, minval=0)
         self.baseline_metrics = self.cv.get_int("latency_baseline_metrics", 30, minval=8)
 
-        self.threshold_sigma = self.cv.get_float("latency_threshold_sigma", 8.0, minval=1.0)
-        self.threshold_floor = self.cv.get_float("latency_threshold_floor", 0.6, minval=0.0)
-        self.consecutive = self.cv.get_int("latency_consecutive", 1, minval=1)
+        self.threshold_sigma = self.cv.get_float("latency_threshold_sigma", 10.0, minval=1.0)
+        self.threshold_floor = self.cv.get_float("latency_threshold_floor", 2.0, minval=0.0)
+        self.consecutive = self.cv.get_int("latency_consecutive", 2, minval=1)
 
         self.arm_lead_s = self.cv.get_float("latency_arm_lead_s", 0.02, minval=0.0)
         self.timeout_s = self.cv.get_float("latency_timeout", 5.0, minval=0.5)

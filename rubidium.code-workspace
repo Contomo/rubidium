@@ -1,20 +1,10 @@
 {
 	"folders": [
 		{
-			"name": "rubidium",
 			"path": "."
 		},
 		{
-			"name": "rubedo",
-			"path": "../rubedo"
-		},
-		{
-			"name": "klipper",
-			"path": "../klipper"
-		},
-		{
-			"name": "printer-config",
-			"path": "../printer_data/config"
+			"path": "../printer_data/config/rubidium"
 		}
 	],
 	"settings": {
