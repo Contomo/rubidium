@@ -5,6 +5,8 @@ export LC_ALL=C
 KLIPPER_PATH="${HOME}/klipper"
 INSTALL_PATH="${HOME}/rubidium"
 REPO_URL="https://github.com/contomo/rubidium.git"
+KLIPPY_ENV_PATH="${HOME}/klippy-env"
+KLIPPY_PYTHON="${KLIPPY_ENV_PATH}/bin/python"
 
 preflight_checks() {
     if [ "${EUID}" -eq 0 ]; then
@@ -72,6 +74,25 @@ link_extension() {
     echo
 }
 
+install_requirements() {
+    local req_file="${INSTALL_PATH}/requirements.txt"
+
+    if [ ! -f "${req_file}" ]; then
+        echo "[INSTALL] No requirements.txt found. Skipping Python deps."
+        echo
+        return
+    fi
+
+    if [ ! -x "${KLIPPY_PYTHON}" ]; then
+        echo "[ERROR] Klippy Python not found at: ${KLIPPY_PYTHON}"
+        echo "        Expected virtualenv at: ${KLIPPY_ENV_PATH}"
+        exit 1
+    fi
+
+    echo "[INSTALL] Installing Python dependencies..."
+    "${KLIPPY_PYTHON}" -m pip install -r "${req_file}"
+    echo
+}
 
 restart_klipper() {
     echo "[POST-INSTALL] Restarting Klipper..."
@@ -85,4 +106,5 @@ printf "======================================\n\n"
 preflight_checks
 check_download
 link_extension
+install_requirements
 restart_klipper
