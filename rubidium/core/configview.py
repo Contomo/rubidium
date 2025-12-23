@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 
 @dataclass(slots=True)
@@ -26,7 +26,6 @@ class ConfigView:
             return self.base
         return self.override
 
-
     # ---------------- primitives
 
     def get_str(self, name: str, default: str) -> str:
@@ -45,6 +44,28 @@ class ConfigView:
         sec = self._pick(name)
         return bool(sec.getboolean(name, default))
 
+    # --------------------------------------------------------------------------------------------------
+
+    def get_str_list(
+        self, name: str, default: Tuple[str, ...] = (), *, sep: str = ",", count: Optional[int] = None
+    ) -> Tuple[str, ...]:
+        sec = self._pick(name)
+        return tuple(sec.getlist(name, default, sep=sep, count=count))
+
+    def get_int_list(
+        self, name: str, default: Tuple[int, ...] = (), *, sep: str = ",", count: Optional[int] = None, **kwargs
+    ) -> Tuple[int, ...]:
+        sec = self._pick(name)
+        return tuple(sec.getintlist(name, default, sep=sep, count=count, **kwargs))
+
+    def get_float_list(
+        self, name: str, default: Tuple[float, ...] = (), *, sep: str = ",", count: Optional[int] = None, **kwargs
+    ) -> Tuple[float, ...]:
+        sec = self._pick(name)
+        return tuple(sec.getfloatlist(name, default, sep=sep, count=count, **kwargs))
+
+    # --------------------------------------------------------------------------------------------------
+
     def get_str_opt(self, name: str) -> Optional[str]:
         sec = self._pick(name)
         v = sec.get(name, None)
@@ -60,6 +81,29 @@ class ConfigView:
             return None
         s = int(v)
         return s if s else None
+    
+    # --------------------------------------------------------------------------------------------------
+
+    def get_str_list_opt(
+        self, name: str, *, sep: str = ",", count: Optional[int] = None
+    ) -> Optional[Tuple[str, ...]]:
+        sec = self._pick(name)
+        v = sec.getlist(name, None, sep=sep, count=count)
+        return None if v is None else tuple(v)
+
+    def get_int_list_opt(
+        self, name: str, *, sep: str = ",", count: Optional[int] = None, **kwargs
+    ) -> Optional[Tuple[int, ...]]:
+        sec = self._pick(name)
+        v = sec.getintlist(name, None, sep=sep, count=count, **kwargs)
+        return None if v is None else tuple(v)
+
+    def get_float_list_opt(
+        self, name: str, *, sep: str = ",", count: Optional[int] = None, **kwargs
+    ) -> Optional[Tuple[float, ...]]:
+        sec = self._pick(name)
+        v = sec.getfloatlist(name, None, sep=sep, count=count, **kwargs)
+        return None if v is None else tuple(v)
 
     # ---------------- required variants
 

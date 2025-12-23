@@ -76,7 +76,7 @@ class RubidiumPrint(RubidiumBase):
 
     # -- helper utilities ------------------------------------------------
     def _compile_param_command_fmt(self, command: str, parameter: str) -> str:
-        """Build a printf format string for tuning commands."""
+        """Build a printf format string for tuning commands"""
         if self.gcode.is_traditional_gcode(command):
             return f"{command} {parameter}%0.9f"
         return f"{command} {parameter}=%0.9f"
@@ -104,7 +104,7 @@ class RubidiumPrint(RubidiumBase):
         return s
 
     def _prepare_lines_for_run(self, lines: Lines, *, s: Dict[str, Any], gcmd, keepout_xy=None) -> Lines:
-        """Add a rectangular multi wall brim around the pattern."""
+        """Add a rectangular multi wall brim around the pattern"""
         if not lines.lines:
             return lines
         
@@ -171,6 +171,7 @@ class RubidiumPrint(RubidiumBase):
         return Lines(tuple(brim_lines) + lines.lines)
 
     def define_exclude_object(self, lines: Lines) -> str:
+        """Lines → Exclude object define (closed poly)"""
         if self.printer.lookup_object("exclude_object", None) is None:
             return ""
 
@@ -185,23 +186,17 @@ class RubidiumPrint(RubidiumBase):
 
         ko = self._keepout_xy
         if ko:
-            kxs = [p[0] for p in ko]
-            kys = [p[1] for p in ko]
-            if kxs and kys:
-                minx = min(minx, min(kxs))
-                maxx = max(maxx, max(kxs))
-                miny = min(miny, min(kys))
-                maxy = max(maxy, max(kys))
+            kxs, kys = [p[0] for p in ko], [p[1] for p in ko]
+            minx, maxx = min(minx, min(kxs)), max(maxx, max(kxs))
+            miny, maxy = min(miny, min(kys)), max(maxy, max(kys))
 
         m = float(EXCLUDE_OBJECT_MARGIN)
         minx -= m; maxx += m
         miny -= m; maxy += m
 
-        cx = (minx + maxx) * 0.5
-        cy = (miny + maxy) * 0.5
+        cx, cy = (minx + maxx) * 0.5, (miny + maxy) * 0.5
 
-        rect = [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)]
-        rect.reverse()
+        rect = [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy), (minx, miny)]
         poly = "[" + ",".join(f"[{x:.3f},{y:.3f}]" for x, y in rect) + "]"
         return f"EXCLUDE_OBJECT_DEFINE NAME=Pattern CENTER={cx:.3f},{cy:.3f} POLYGON={poly}"
 

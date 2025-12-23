@@ -1,30 +1,24 @@
 # rubidium/analysis/analyzer.py
-"""Video analysis routines for Rubidium"""
-
 from __future__ import annotations
 
 import csv
-import re
-from dataclasses import dataclass
+import json
+import logging
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Tuple
 
 import numpy as np
-
-try:
-    import cv2
-except Exception:
-    cv2 = None
+import cv2
 
 from .image_processing import (
     CropConfig,
     LaserExtractConfig,
-    crop_frame,
-    build_laser_mask,
-    masked_gray,
-    stripe_centroid_per_row,
+    build_laser_pipeline,
+    run_pipeline,
 )
 from .scoring import ScoreBreakdown, score_heightmap
+from .visualization import render_heightmap_plot, create_debug_thumbnails, save_dashboard
 
 
 @dataclass(slots=True)
@@ -37,24 +31,24 @@ class CameraCalibration:
 class TriangulationConfig:
     enabled: bool = False
     camera_calibration_path: Optional[str] = None
-    laser_plane_abcd: Optional[tuple[float, float, float, float]] = None
-    bed_plane_abcd: Optional[tuple[float, float, float, float]] = None
+    laser_plane_abcd: Optional[Tuple[float, float, float, float]] = None
+    bed_plane_abcd: Optional[Tuple[float, float, float, float]] = None
 
 
 @dataclass(slots=True)
 class AnalysisConfig:
-    crop: CropConfig = CropConfig()
-    laser: LaserExtractConfig = LaserExtractConfig()
+    crop: CropConfig = field(default_factory=CropConfig)
+    laser: LaserExtractConfig = field(default_factory=LaserExtractConfig)
+    triangulation: TriangulationConfig = field(default_factory=TriangulationConfig)
 
     frame_step: int = 1
-    max_frames: int = 0  # 0 => all
-
-    triangulation: TriangulationConfig = TriangulationConfig()
-
-    write_plots: bool = True
+    max_frames: int = 0
+    write_plots: bool = False
     write_npz: bool = True
-
     output_dir: Optional[str] = None
+
+    # NEW: optional pipeline ordering by step names
+    pipeline_steps: Optional[List[str]] = None
 
 
 @dataclass(slots=True)
@@ -63,247 +57,121 @@ class LineAnalysis:
     idx: int
     pa: float
     breakdown: ScoreBreakdown
-    height_map_kind: str  # "pixel" or "triangulate"
-    plot_path: Optional[Path]
-    npz_path: Optional[Path]
+    height_map_kind: str
+    height_map: Optional[np.ndarray] = None
+    thumb_crop: Optional[np.ndarray] = None
+    thumb_mask: Optional[np.ndarray] = None
+    thumb_track: Optional[np.ndarray] = None
+    plot_path: Optional[Path] = None
+    npz_path: Optional[Path] = None
+    ok: bool = True
 
 
 @dataclass(slots=True)
 class AnalysisSummary:
     dirpath: Path
-    results: list[LineAnalysis]
+    results: List[LineAnalysis]
     best: Optional[LineAnalysis]
     summary_csv: Optional[Path]
-    summary_plot: Optional[Path]
-
-
-_pa_re = re.compile(r"pa_([-+]?[0-9]*\.?[0-9]+)")
-_idx_re = re.compile(r"rubedo_line_(\d+)")
-
-
-def _ensure_cv2() -> None:
-    if cv2 is None:
-        raise RuntimeError("rubidium: cv2 not available in this python env")
-
-
-def _parse_plane_abcd(abcd: tuple[float, float, float, float]) -> tuple[np.ndarray, float]:
-    n = np.asarray([abcd[0], abcd[1], abcd[2]], dtype=np.float32)
-    d = float(abcd[3])
-    nn = float(np.linalg.norm(n))
-    if nn <= 0.0:
-        raise ValueError("invalid plane normal")
-    n = n / nn
-    d = d / nn
-    return n, d
+    summary_sheet: Optional[Path]
 
 
 def _load_camera_calibration(path: Path) -> CameraCalibration:
-    _ensure_cv2()
-
     if path.suffix.lower() == ".npz":
         data = np.load(str(path))
-        K = np.asarray(data["K"], dtype=np.float32)
-        dist = np.asarray(data["dist"], dtype=np.float32)
-        return CameraCalibration(K=K, dist=dist)
+        return CameraCalibration(
+            K=np.asarray(data["K"], dtype=np.float32),
+            dist=np.asarray(data["dist"], dtype=np.float32),
+        )
 
-    # OpenCV YAML/XML via FileStorage
     fs = cv2.FileStorage(str(path), cv2.FILE_STORAGE_READ)
     if not fs.isOpened():
-        raise RuntimeError(f"rubidium: failed to read camera calibration file: {path}")
+        raise RuntimeError(f"rubidium: failed to read calib: {path}")
 
     K = fs.getNode("K").mat()
     if K is None or K.size == 0:
         K = fs.getNode("camera_matrix").mat()
+
     dist = fs.getNode("dist").mat()
     if dist is None or dist.size == 0:
         dist = fs.getNode("distortion_coefficients").mat()
+
     fs.release()
-
-    if K is None or dist is None:
-        raise RuntimeError(f"rubidium: calibration file missing K/dist: {path}")
-
     return CameraCalibration(K=np.asarray(K, dtype=np.float32), dist=np.asarray(dist, dtype=np.float32))
 
 
-def _triangulate_points(
-    u_px: np.ndarray,
-    v_px: np.ndarray,
-    calib: CameraCalibration,
-    laser_plane_abcd: tuple[float, float, float, float],
-) -> np.ndarray:
-    """Intersect camera rays with the laser plane.
-
-    Returns Nx3 points in camera coordinates.
-    """
-    _ensure_cv2()
-
-    n, d = _parse_plane_abcd(laser_plane_abcd)
-
-    pts = np.stack([u_px, v_px], axis=1).reshape((-1, 1, 2)).astype(np.float32)
-    und = cv2.undistortPoints(pts, calib.K, calib.dist)
-    xy = und.reshape((-1, 2)).astype(np.float32)
-
-    dirs = np.concatenate([xy, np.ones((xy.shape[0], 1), dtype=np.float32)], axis=1)
-    denom = dirs @ n
-
-    # Avoid division by near-zero; those rays are effectively parallel to the plane.
-    eps = 1e-9
-    good = np.abs(denom) > eps
-
-    out = np.full((dirs.shape[0], 3), np.nan, dtype=np.float32)
-    if not np.any(good):
-        return out
-
-    t = (-d) / denom[good]
-    out[good] = dirs[good] * t[:, None]
-    return out
-
-
-def _height_from_points(
-    pts_cam: np.ndarray,
-    bed_plane_abcd: Optional[tuple[float, float, float, float]],
-) -> np.ndarray:
-    """Convert 3D points to a scalar height.
-
-    If bed_plane is available: signed distance to that plane.
-    Otherwise: use camera Z as a fallback (still useful for relative scoring).
-    """
-    if bed_plane_abcd is None:
-        return pts_cam[:, 2].astype(np.float32)
-
-    n, d = _parse_plane_abcd(bed_plane_abcd)
-    return (pts_cam @ n + d).astype(np.float32)
-
-
-def _plot_heightmap(height_map: np.ndarray, out_png: Path, *, title: str) -> None:
-    # Imported lazily: Klipper envs vary.
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    hm = height_map
-    fig = plt.figure(figsize=(10, 4))
-    ax = fig.add_subplot(1, 1, 1)
-    ax.set_title(title)
-    ax.set_xlabel("bin")
-    ax.set_ylabel("frame")
-
-    vmin = float(np.nanpercentile(hm, 5))
-    vmax = float(np.nanpercentile(hm, 95))
-    ax.imshow(hm, aspect="auto", interpolation="nearest", vmin=vmin, vmax=vmax)
-
-    fig.tight_layout()
-    fig.savefig(str(out_png), dpi=150)
-    plt.close(fig)
-
-
-def analyze_video(path: Path, cfg: AnalysisConfig) -> LineAnalysis:
-    """Analyse a single video file and return a score + artifacts."""
-    _ensure_cv2()
-
+def analyze_video(path: Path, idx: int, pa: float, cfg: AnalysisConfig) -> LineAnalysis:
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
-        raise RuntimeError(f"rubidium: failed to open video: {path}")
+        logging.warning(f"rubidium: failed to open video: {path}")
+        return LineAnalysis(path, idx, pa, ScoreBreakdown(float("inf"), float("inf"), 0.0, 1.0), "err", ok=False)
 
-    centers: list[np.ndarray] = []
+    steps = build_laser_pipeline(cfg.pipeline_steps)
+
+    centers: List[np.ndarray] = []
     frames = 0
     kept = 0
+    total_frames_est = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    debug_frame_idx = max(1, total_frames_est // 2)
 
-    # Store crop origin so we can rebuild absolute pixels for triangulation.
-    crop_x0 = 0
-    crop_y0 = 0
+    t_crop, t_mask, t_track = None, None, None
+    expected_h: Optional[int] = None  # centroid vector length (crop height)
 
     while True:
         ok, frame = cap.read()
         if not ok:
             break
         frames += 1
-        if cfg.frame_step > 1 and ((frames - 1) % cfg.frame_step) != 0:
+
+        is_process = (cfg.frame_step == 1) or ((frames - 1) % cfg.frame_step) == 0
+        is_debug = (frames == debug_frame_idx)
+        if not is_process and not is_debug:
             continue
 
-        cropped, (x0, y0) = crop_frame(frame, cfg.crop)
-        crop_x0, crop_y0 = x0, y0
+        ctx = run_pipeline(
+            frame,
+            steps,
+            cfg_crop=cfg.crop,
+            cfg_laser=cfg.laser,
+            keep_debug=False,
+        )
 
-        mask = build_laser_mask(cropped, cfg.laser)
-        gray = masked_gray(cropped, mask)
-        cx = stripe_centroid_per_row(gray, cfg.laser)
-        centers.append(cx)
+        cropped = ctx.cropped_bgr if ctx.cropped_bgr is not None else frame
+        mask = ctx.mask_u8
+        cx = ctx.centroid_x
 
-        kept += 1
+        if cx is not None:
+            if expected_h is None:
+                expected_h = int(cx.shape[0])
+            elif int(cx.shape[0]) != expected_h:
+                # if crop height changes unexpectedly, skip this frame
+                continue
+
+        if is_process:
+            if cx is not None:
+                centers.append(cx)
+                kept += 1
+
+        if is_debug:
+            if mask is not None and cx is not None:
+                try:
+                    t_crop, t_mask, t_track = create_debug_thumbnails(cropped, mask, cx)
+                except Exception:
+                    pass
+
         if cfg.max_frames and kept >= cfg.max_frames:
             break
 
     cap.release()
 
     if not centers:
-        bd = ScoreBreakdown(score=float("inf"), roughness=float("inf"), transient=0.0, dropouts=1.0)
-        return LineAnalysis(path, idx=-1, pa=0.0, breakdown=bd, height_map_kind="pixel", plot_path=None, npz_path=None)
+        return LineAnalysis(path, idx, pa, ScoreBreakdown(float("inf"), float("inf"), 0.0, 1.0), "empty", ok=False)
 
-    center_map = np.stack(centers, axis=0).astype(np.float32)  # (frames, rows)
-
-    # Baseline remove: subtract per-row median.
+    center_map = np.stack(centers, axis=0).astype(np.float32)
     baseline = np.nanmedian(center_map, axis=0)
-    delta_px = center_map - baseline[None, :]
-
-    hm_kind = "pixel"
-    height_map = delta_px
-
-    # Optional triangulation.
-    tri = cfg.triangulation
-    if tri.enabled:
-        if tri.camera_calibration_path is None or tri.laser_plane_abcd is None:
-            raise RuntimeError("rubidium: triangulation enabled but camera_calibration_path / laser_plane_abcd is missing")
-
-        calib = _load_camera_calibration(Path(tri.camera_calibration_path))
-        laser_plane = tri.laser_plane_abcd
-        bed_plane = tri.bed_plane_abcd
-
-        h = center_map.shape[1]
-        ys = np.arange(h, dtype=np.float32)
-
-        heights: list[np.ndarray] = []
-        for cx in center_map:
-            good = np.isfinite(cx)
-            if not np.any(good):
-                heights.append(np.full((h,), np.nan, dtype=np.float32))
-                continue
-
-            u = (cx[good] + float(crop_x0)).astype(np.float32)
-            v = (ys[good] + float(crop_y0)).astype(np.float32)
-
-            pts = _triangulate_points(u, v, calib, laser_plane)
-            z = _height_from_points(pts, bed_plane)
-
-            row_h = np.full((h,), np.nan, dtype=np.float32)
-            row_h[good] = z
-            heights.append(row_h)
-
-        height_map = np.stack(heights, axis=0).astype(np.float32)
-
-        # Baseline remove: subtract per-row median again (in whatever height units).
-        b2 = np.nanmedian(height_map, axis=0)
-        height_map = height_map - b2[None, :]
-
-        hm_kind = "triangulate"
+    height_map = center_map - baseline[None, :]
 
     breakdown = score_heightmap(height_map)
-
-    # Parse idx + pa from filename.
-    idx = -1
-    pa = 0.0
-    mi = _idx_re.search(path.name)
-    if mi:
-        try:
-            idx = int(mi.group(1))
-        except Exception:
-            idx = -1
-    mp = _pa_re.search(path.name)
-    if mp:
-        try:
-            pa = float(mp.group(1))
-        except Exception:
-            pa = 0.0
 
     outdir = Path(cfg.output_dir) if cfg.output_dir else (path.parent / "analysis")
     outdir.mkdir(parents=True, exist_ok=True)
@@ -311,121 +179,101 @@ def analyze_video(path: Path, cfg: AnalysisConfig) -> LineAnalysis:
     plot_path: Optional[Path] = None
     if cfg.write_plots:
         try:
-            plot_path = outdir / f"analysis_line_{idx:03d}_pa_{pa:.5f}.png"
-            _plot_heightmap(height_map, plot_path, title=f"line {idx:03d}  pa={pa:.5f}  score={breakdown.score:.3f}")
+            plot_path = outdir / f"line_{idx:03d}_pa_{pa:.5f}.png"
+            img = render_heightmap_plot(height_map, width_px=800, height_px=300, limit_scale=None)
+            cv2.imwrite(str(plot_path), img)
         except Exception:
-            plot_path = None
+            pass
 
     npz_path: Optional[Path] = None
     if cfg.write_npz:
         try:
-            npz_path = outdir / f"analysis_line_{idx:03d}_pa_{pa:.5f}.npz"
+            npz_path = outdir / f"line_{idx:03d}_pa_{pa:.5f}.npz"
+            step_names = np.array([s.name for s in steps], dtype=object)
             np.savez_compressed(
                 str(npz_path),
                 height_map=height_map,
                 center_map=center_map,
-                baseline=baseline,
-                score=np.float32(breakdown.score),
-                roughness=np.float32(breakdown.roughness),
-                transient=np.float32(breakdown.transient),
-                dropouts=np.float32(breakdown.dropouts),
-                kind=np.array([hm_kind]),
+                score=breakdown.score,
+                steps=step_names,
             )
         except Exception:
-            npz_path = None
+            pass
 
     return LineAnalysis(
         video_path=path,
         idx=idx,
         pa=pa,
         breakdown=breakdown,
-        height_map_kind=hm_kind,
+        height_map_kind="pixel",
+        height_map=height_map,
+        thumb_crop=t_crop,
+        thumb_mask=t_mask,
+        thumb_track=t_track,
         plot_path=plot_path,
         npz_path=npz_path,
+        ok=True,
     )
 
 
-def _plot_summary(results: list[LineAnalysis], out_png: Path) -> None:
-    import matplotlib
+def analyze_session_json(json_path: Path, cfg: AnalysisConfig) -> AnalysisSummary:
+    if not json_path.exists():
+        raise FileNotFoundError(f"Session not found: {json_path}")
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise ValueError(f"Failed parsing JSON: {e}")
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    session_dir = json_path.parent
+    clips = data.get("clips", [])
 
-    xs = [r.pa for r in results]
-    ys = [r.breakdown.score for r in results]
-
-    fig = plt.figure(figsize=(7, 4))
-    ax = fig.add_subplot(1, 1, 1)
-    ax.set_title("Rubidium analysis: score vs PA")
-    ax.set_xlabel("pressure advance")
-    ax.set_ylabel("score (lower is better)")
-    ax.plot(xs, ys, marker="o")
-    fig.tight_layout()
-    fig.savefig(str(out_png), dpi=150)
-    plt.close(fig)
-
-
-def analyze_directory(dirpath: Path, cfg: Optional[AnalysisConfig] = None) -> AnalysisSummary:
-    """Analyse all matching video files in a directory."""
-    cfg = cfg or AnalysisConfig()
-
-    videos = sorted(dirpath.glob("rubedo_line_*_pa_*.mp4"))
-    if not videos:
-        return AnalysisSummary(dirpath=dirpath, results=[], best=None, summary_csv=None, summary_plot=None)
-
-    outdir = Path(cfg.output_dir) if cfg.output_dir else (dirpath / "analysis")
+    outdir = Path(cfg.output_dir) if cfg.output_dir else (session_dir / "analysis")
     outdir.mkdir(parents=True, exist_ok=True)
+    cfg.output_dir = str(outdir)
 
-    results: list[LineAnalysis] = []
-    for vp in videos:
-        results.append(analyze_video(vp, cfg))
+    results: List[LineAnalysis] = []
 
-    # Sort by PA for consistent plots.
+    for clip in clips:
+        if clip.get("ok") is False:
+            continue
+
+        fname = Path(clip.get("file", ""))
+        if not fname.name:
+            continue
+        vid_path = fname if fname.is_absolute() else session_dir / fname.name
+        if not vid_path.exists():
+            continue
+
+        idx = int(clip.get("idx", -1))
+        pa = float(clip.get("parameter_value", 0.0))
+
+        res = analyze_video(vid_path, idx, pa, cfg)
+        if res.ok:
+            results.append(res)
+
     results.sort(key=lambda r: r.pa)
-
     best = min(results, key=lambda r: r.breakdown.score) if results else None
 
-    # Write summary CSV.
-    summary_csv = outdir / "analysis_summary.csv"
+    csv_path: Optional[Path] = outdir / "summary.csv"
     try:
-        with summary_csv.open("w", newline="") as f:
+        with csv_path.open("w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["idx", "pa", "score", "roughness", "transient", "dropouts", "kind", "video", "plot", "npz"])
+            w.writerow(["idx", "pa", "score", "roughness", "transient", "dropouts", "pk_pk_px"])
             for r in results:
-                w.writerow(
-                    [
-                        r.idx,
-                        f"{r.pa:.6f}",
-                        f"{r.breakdown.score:.6f}",
-                        f"{r.breakdown.roughness:.6f}",
-                        f"{r.breakdown.transient:.6f}",
-                        f"{r.breakdown.dropouts:.6f}",
-                        r.height_map_kind,
-                        r.video_path.name,
-                        r.plot_path.name if r.plot_path else "",
-                        r.npz_path.name if r.npz_path else "",
-                    ]
-                )
+                pk_pk = 0.0
+                if r.height_map is not None:
+                    vals = r.height_map[np.isfinite(r.height_map)]
+                    if vals.size > 0:
+                        pk_pk = float(np.max(vals) - np.min(vals))
+                w.writerow([r.idx, r.pa, r.breakdown.score, r.breakdown.roughness, r.breakdown.transient, r.breakdown.dropouts, pk_pk])
     except Exception:
-        summary_csv = None
+        csv_path = None
 
-    summary_plot = outdir / "analysis_summary.png"
+    sheet_path: Optional[Path] = outdir / "analysis_dashboard.jpg"
     try:
-        _plot_summary(results, summary_plot)
-    except Exception:
-        summary_plot = None
-
-    # Write best PA text.
-    if best is not None:
-        try:
-            (outdir / "best_pa.txt").write_text(f"{best.pa:.6f}\n")
-        except Exception:
-            pass
-
-    return AnalysisSummary(
-        dirpath=dirpath,
-        results=results,
-        best=best,
-        summary_csv=summary_csv,
-        summary_plot=summary_plot,
-    )
+        save_dashboard(results, sheet_path)
+    except Exception as e:
+        logging.error(f"Failed to save dashboard: {e}")
+        sheet_path = None
+        
+    return AnalysisSummary(session_dir, results, best, csv_path, sheet_path)

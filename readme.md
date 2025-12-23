@@ -9,7 +9,6 @@ It provides a framework to:
 - analyze the results
 
 
-## Core concepts
 
 ### Patterns
 The template, basically something with settings assigned a name
@@ -37,6 +36,38 @@ right now:
 - markers and metadata are written to a JSON file
 - per-segment video clips are generated
 
+## Example configured pattern and its results:
+
+```
+[rubidium pattern multistep]
+origin_x:         100
+origin_y:         100
+
+layer_height:     0.25
+
+line_length:      70
+line_spacing:     2
+
+pattern_segments:
+    medium:         0.2,
+    scv:            0.2,
+    medium:         0.2,
+    fast:           0.2,
+    medium_slow:    0.2
+
+param_start:      0.1
+param_stop:       0.6
+param_count:      12
+
+tuning_command:   SET_PRESSURE_ADVANCE
+tuning_parameter: OFFSET
+```
+
+<div style="display:flex; gap:12px;">
+  <img src="media/analysis_5step.jpg" alt="Image 1" style="width:48%;">
+  <img src="media/pattern_5step.jpg" alt="Image 2" style="width:48%;">
+</div>
+
 ---
 
 ## Install
@@ -46,18 +77,12 @@ wget -O - https://raw.githubusercontent.com/Contomo/rubidium/main/install.sh | b
 ```
 This script will download this GitHub repository to your RaspberryPi home directory, and symlink the files in the Klipper extra folder.
 
+> Note that you may need to install cv2, numpy, and or matplotlib into your klippy env if you havent already.
+
 
 ## Status
 
 Rubidium is an active work in progress.
-
-> printing works fine  
-> single pattern definition works fine  
-> scanning works fine*ish*  
-
-> still a timing issue in video recording  
-> multiple print/scan/pattern sections untested
-> analysis not tested at all just gibberish rn
 
 ---
 

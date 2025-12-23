@@ -111,7 +111,7 @@ class RubidiumBase:
         pattern.apply_gcmd(gcmd)
         lines = pattern.lines
         if lines is None:
-            raise gcmd.error(f"rubidium: pattern '{pattern_name}' has no built lines")
+            raise gcmd.error(f"{self.provider_name} pattern '{pattern_name}' has no built lines")
 
         keepout_xy = pattern.get_keepout_outline_xy()
 
@@ -129,6 +129,7 @@ class RubidiumBase:
         self._keepout_xy = keepout_xy 
         self._run_gcmd = gcmd # wtf
         self.progress = 0.0
+        gcmd.respond_info(f"{self.provider_name} running with pattern '{pattern_name}'")
         self.sdcard.print_with_gcode_provider(self)  # type: ignore # perhaps not deligate this to self but a subclass instantiated with all those settings instead
 
     def _select_pattern_name(self, gcmd) -> str:
@@ -269,9 +270,9 @@ class RubidiumBase:
         return self._iter_run()
 
     def get_stats(self, eventtime):
-        return True, self.provider_name
+        return True, self.provider_name # this is the virtual sd card crap, why is this in the base class.... this should be offloaded into a true generator only class
 
-    def get_status(self, eventtime): # this is the virtual sd card crap, why is this in the base class.... this should be offloaded into a true generator only class
+    def get_status(self, eventtime): 
         st = {
             "file_path": self.get_name(),
             "progress": self.progress,

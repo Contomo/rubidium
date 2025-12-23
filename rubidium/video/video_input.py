@@ -293,6 +293,15 @@ class VideoInput:
                     out_path = self._current_outdir / out_name
                     dump_path = self._current_outdir / f"{self.video_session_filename}.dump.{self.video_dump_container}"
 
+                    clip_meta = {
+                        "key": pl["key"],
+                        "idx": pl["idx"],
+                        "start": start_ts,
+                        "end": t_s
+                    }
+                    if pl["meta"]:
+                        clip_meta.update(pl["meta"])
+
                     self.engine.submit(CmdQueueCut(
                         input_path=dump_path,
                         output_path=out_path,
@@ -300,7 +309,7 @@ class VideoInput:
                         duration_s=duration,
                         cmd_args_in=self.video_cut_extra_args[0],
                         cmd_args_out=self.video_cut_extra_args[1],
-                        clip_metadata={"key": pl["key"], "idx": pl["idx"], "start": start_ts, "end": t_s}
+                        clip_metadata=clip_meta
                     ))
 
         self._planner_cb.schedule_cb(_mark_cb, payload=payload)

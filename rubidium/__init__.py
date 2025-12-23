@@ -56,7 +56,7 @@ def load_config_prefix(config: Any):
         
     if kind in ("analyse"):
         if len(parts) == 2:
-            from .analysis.analyse_mode import RubidiumAnalyse
+            from .modes.analyse_mode import RubidiumAnalyse
             return RubidiumAnalyse(config)
         else:
             raise config.error(f'Invalid section [{cfg_name}], analyse sections may not be named (yet)')
