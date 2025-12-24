@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import cv2
@@ -49,6 +50,9 @@ def render_heightmap_plot(
 
     file_bytes = np.asarray(bytearray(io_buf.read()), dtype=np.uint8)
     img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+    if img is None:
+        img = np.zeros((height_px, width_px, 3), dtype=np.uint8)
 
     if img.shape[0] != height_px or img.shape[1] != width_px:
         img = cv2.resize(img, (width_px, height_px), interpolation=cv2.INTER_AREA)
@@ -134,10 +138,324 @@ def _global_limit_from_results(results: List) -> float:
     return global_limit
 
 
-def _save_dashboard_rows(results: List, out_path: Path) -> None:
+def _center_crop_resize(img: np.ndarray, out_w: int, out_h: int, *, bg_color=(30, 30, 30)) -> np.ndarray:
+    """Resize with center-crop so that the output is exactly out_w x out_h."""
+    if out_w <= 0 or out_h <= 0:
+        return np.zeros((max(1, out_h), max(1, out_w), 3), dtype=np.uint8)
+    if img is None:
+        out = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+        out[:] = bg_color
+        return out
+
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+    h, w = img.shape[:2]
+    if h <= 0 or w <= 0:
+        out = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+        out[:] = bg_color
+        return out
+
+    s = max(out_w / float(w), out_h / float(h))
+    nw = max(1, int(round(w * s)))
+    nh = max(1, int(round(h * s)))
+    resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+
+    x0 = max(0, (nw - out_w) // 2)
+    y0 = max(0, (nh - out_h) // 2)
+    return resized[y0 : y0 + out_h, x0 : x0 + out_w]
+
+
+def _wrap_text_to_width(text: str, *, font, font_scale: float, thickness: int, max_w: int) -> List[str]:
+    """Best-effort word wrap for cv2.putText."""
+    s = str(text).replace("\r", "").strip()
+    if not s:
+        return [""]
+
+    words = s.split()
+    lines: List[str] = []
+    cur: List[str] = []
+
+    def line_w(t: str) -> int:
+        (w, _), _ = cv2.getTextSize(t, font, font_scale, thickness)
+        return int(w)
+
+    for w in words:
+        test = (" ".join(cur + [w])).strip()
+        if cur and line_w(test) > max_w:
+            lines.append(" ".join(cur))
+            cur = [w]
+        else:
+            cur.append(w)
+
+    if cur:
+        lines.append(" ".join(cur))
+
+    # if a single token is wider than max, just hard-cut it.
+    out: List[str] = []
+    for ln in lines:
+        if line_w(ln) <= max_w:
+            out.append(ln)
+            continue
+        # hard slice
+        buf = ""
+        for ch in ln:
+            if line_w(buf + ch) > max_w and buf:
+                out.append(buf)
+                buf = ch
+            else:
+                buf += ch
+        if buf:
+            out.append(buf)
+    return out
+
+
+def _render_debug_panel(
+    *,
+    results: List,
+    debug: Optional[Dict[str, Any]],
+    width_px: int,
+    height_px: int = 220,
+) -> np.ndarray:
+    BORDER = 2
+    BG_COLOR = (30, 30, 30)
+    BORDER_COLOR = (100, 100, 100)
+    TEXT_COLOR = (220, 220, 220)
+
+    panel = np.zeros((height_px, width_px, 3), dtype=np.uint8)
+    panel[:] = BG_COLOR
+
+    if not debug:
+        cv2.rectangle(panel, (0, 0), (width_px - 1, height_px - 1), BORDER_COLOR, 1)
+        return panel
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    # Left text area
+    w_text = max(380, min(720, int(width_px * 0.45)))
+    w_text = min(w_text, width_px - 2 * BORDER)
+
+    # Right images area (optional)
+    w_imgs = width_px - w_text - 3 * BORDER
+
+    # ---- compose text lines
+    lines: List[str] = []
+
+    session = str(debug.get("session") or "")
+    if session:
+        lines.append(f"session: {session}")
+
+    counts = debug.get("counts") or {}
+    if isinstance(counts, dict):
+        ct = counts.get("clips_total", None)
+        ca = counts.get("clips_analyzed", None)
+        cr = counts.get("results_ok", None)
+        if ct is not None or ca is not None or cr is not None:
+            parts = []
+            if ct is not None:
+                parts.append(f"clips={int(ct)}")
+            if ca is not None:
+                parts.append(f"analyzed={int(ca)}")
+            if cr is not None:
+                parts.append(f"ok={int(cr)}")
+            if parts:
+                lines.append("counts: " + ", ".join(parts))
+
+    crop_i = debug.get("crop_initial") or {}
+    crop_f = debug.get("crop_final") or {}
+
+    def _fmt_crop(prefix: str, c: Dict[str, Any]) -> str:
+        cxcy = c.get("center_xy")
+        wh = c.get("wh")
+        ref = c.get("ref_wh")
+        s = prefix
+        if isinstance(cxcy, (list, tuple)) and len(cxcy) >= 2:
+            s += f" center=({float(cxcy[0]):.2f},{float(cxcy[1]):.2f})"
+        if isinstance(wh, (list, tuple)) and len(wh) >= 2:
+            s += f" wh={int(wh[0])}x{int(wh[1])}"
+        if isinstance(ref, (list, tuple)) and len(ref) >= 2:
+            s += f" ref={int(ref[0])}x{int(ref[1])}"
+        return s
+
+    if isinstance(crop_i, dict):
+        lines.append(_fmt_crop("crop(init):", crop_i))
+    if isinstance(crop_f, dict):
+        lines.append(_fmt_crop("crop(final):", crop_f))
+
+    ac_cfg = debug.get("autocrop") or {}
+    ac_enabled = bool(ac_cfg.get("enable", False)) if isinstance(ac_cfg, dict) else False
+    if ac_enabled:
+        search_wh = ac_cfg.get("search_wh") if isinstance(ac_cfg, dict) else None
+        spc = ac_cfg.get("samples_per_clip") if isinstance(ac_cfg, dict) else None
+        kp = ac_cfg.get("keep_percentile") if isinstance(ac_cfg, dict) else None
+        mk = ac_cfg.get("min_kept") if isinstance(ac_cfg, dict) else None
+        ms = ac_cfg.get("max_samples") if isinstance(ac_cfg, dict) else None
+        parts = ["autocrop: enabled"]
+        if isinstance(search_wh, (list, tuple)) and len(search_wh) >= 2:
+            parts.append(f"search={int(search_wh[0])}x{int(search_wh[1])}")
+        if spc is not None:
+            parts.append(f"samples/clip={int(spc)}")
+        if ms is not None and int(ms) > 0:
+            parts.append(f"max={int(ms)}")
+        if kp is not None:
+            parts.append(f"keep%={float(kp):.1f}")
+        if mk is not None:
+            parts.append(f"min_kept={int(mk)}")
+        lines.append(" | ".join(parts))
+    else:
+        lines.append("autocrop: disabled")
+
+    # autocrop.json summary if present
+    out_dir_s = str(debug.get("output_dir") or "")
+    if out_dir_s:
+        ap = Path(out_dir_s) / "autocrop.json"
+        if ap.exists():
+            try:
+                d = json.loads(ap.read_text(encoding="utf-8"))
+                status = str(d.get("status") or "")
+                applied = d.get("applied")
+                cxy = d.get("center_xy")
+                space = str(d.get("center_space") or "")
+                st = d.get("samples_total")
+                sv = d.get("samples_valid")
+                sk = d.get("samples_kept")
+                thr = d.get("score_threshold")
+                mad = d.get("mad_px")
+                line = "autocrop(result):"
+                if status:
+                    line += f" status={status}"
+                if applied is not None:
+                    try:
+                        line += f" applied={int(bool(applied))}"
+                    except Exception:
+                        pass
+                if isinstance(cxy, (list, tuple)) and len(cxy) >= 2:
+                    line += f" center=({float(cxy[0]):.2f},{float(cxy[1]):.2f})"
+                    if space:
+                        line += f"[{space}]"
+                bits = []
+                if st is not None:
+                    bits.append(f"samples={int(st)}")
+                if sv is not None:
+                    bits.append(f"valid={int(sv)}")
+                if sk is not None:
+                    bits.append(f"kept={int(sk)}")
+                if thr is not None:
+                    bits.append(f"thr={float(thr):.3g}")
+                if isinstance(mad, (list, tuple)) and len(mad) >= 2:
+                    bits.append(f"mad=({float(mad[0]):.2f},{float(mad[1]):.2f})")
+                if bits:
+                    line += " | " + ", ".join(bits)
+                lines.append(line)
+
+                rejects = d.get("rejects")
+                if isinstance(rejects, dict) and rejects:
+                    pairs = []
+                    for k, v in rejects.items():
+                        try:
+                            pairs.append((str(k), int(v)))
+                        except Exception:
+                            continue
+                    pairs.sort(key=lambda kv: (-kv[1], kv[0]))
+                    if pairs:
+                        # Keep it compact; show the most common reasons.
+                        msg = ", ".join([f"{k}={v}" for (k, v) in pairs[:6]])
+                        lines.append(f"autocrop(rejects): {msg}")
+            except Exception:
+                lines.append("autocrop(result): failed to read autocrop.json")
+        elif ac_enabled:
+            lines.append("autocrop(result): no autocrop.json (failed/early-exit)")
+
+    # best line summary
+    if results:
+        best = min(results, key=lambda r: float(getattr(r.breakdown, "score", 0.0)))
+        try:
+            score = float(best.breakdown.score)
+        except Exception:
+            score = float("nan")
+        pa1 = float(getattr(best, "pa", 0.0))
+        pa2 = getattr(best, "pa2", None)
+        rr = getattr(best, "grid_row", None)
+        cc = getattr(best, "grid_col", None)
+        if pa2 is None:
+            s = f"best: p={pa1:.6f} score={score:.3f}"
+        else:
+            s = f"best: p={pa1:.6f},{float(pa2):.6f} score={score:.3f}"
+        if rr is not None and cc is not None:
+            s += f" [r{int(rr)},c{int(cc)}]"
+        lines.append(s)
+
+    # warnings (autocrop first)
+    warnings = debug.get("warnings") or []
+    if isinstance(warnings, (list, tuple)) and warnings:
+        ac_warn = [str(w) for w in warnings if str(w).lower().startswith("autocrop:")]
+        other_warn = [str(w) for w in warnings if not str(w).lower().startswith("autocrop:")]
+        show = ac_warn[:6] + other_warn[:6]
+        if show:
+            lines.append("warnings:")
+            for w in show:
+                lines.append(f"- {w}")
+
+    # Draw text
+    x = BORDER + 8
+    y = BORDER + 18
+    max_w = w_text - 2 * BORDER - 16
+    font_scale = 0.45
+    thickness = 1
+    line_h = 18
+
+    for ln in lines:
+        for seg in _wrap_text_to_width(ln, font=font, font_scale=font_scale, thickness=thickness, max_w=max_w):
+            if y + line_h > height_px - BORDER:
+                break
+            cv2.putText(panel, seg, (x, y), font, font_scale, TEXT_COLOR, thickness, cv2.LINE_AA)
+            y += line_h
+        if y + line_h > height_px - BORDER:
+            break
+
+    # Images on the right (autocrop previews)
+    if w_imgs >= 260 and out_dir_s:
+        img_area_x0 = w_text + 2 * BORDER
+        img_area_w = width_px - img_area_x0 - BORDER
+        slot_w = max(1, (img_area_w - 2 * BORDER) // 3)
+        slot_h = height_px - 2 * BORDER
+
+        paths = [
+            ("ac_preview", Path(out_dir_s) / "autocrop_preview.jpg"),
+            ("ac_final", Path(out_dir_s) / "autocrop_final.jpg"),
+            ("ac_mask", Path(out_dir_s) / "autocrop_mask.jpg"),
+        ]
+
+        sx = img_area_x0
+        for label, p in paths:
+            tile = np.zeros((slot_h, slot_w, 3), dtype=np.uint8)
+            tile[:] = BG_COLOR
+            img = None
+            if p.exists():
+                try:
+                    img = cv2.imread(str(p), cv2.IMREAD_COLOR)
+                except Exception:
+                    img = None
+            if img is not None:
+                tile = _center_crop_resize(img, slot_w, slot_h, bg_color=BG_COLOR)
+
+            # label strip
+            overlay = tile.copy()
+            cv2.rectangle(overlay, (0, 0), (slot_w - 1, 18), (0, 0, 0), -1)
+            tile = cv2.addWeighted(overlay, 0.55, tile, 0.45, 0)
+            cv2.putText(tile, label, (6, 14), font, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
+
+            panel[BORDER : BORDER + slot_h, sx : sx + slot_w] = tile
+            sx += slot_w + BORDER
+
+    cv2.rectangle(panel, (0, 0), (width_px - 1, height_px - 1), BORDER_COLOR, 1)
+    return panel
+
+
+def _render_dashboard_rows(results: List) -> Optional[np.ndarray]:
     """Original per-line dashboard (RAW/MASK/TRACK + heightmap per row)."""
     if not results:
-        return
+        return None
 
     H_ROW = 120
     W_INFO = 260
@@ -173,6 +491,9 @@ def _save_dashboard_rows(results: List, out_path: Path) -> None:
     put_txt(header, f"DEVIATION +/-{global_limit:.2f}px", off + 10)
     rows.append(header)
 
+    def format_thumb(img: np.ndarray) -> np.ndarray:
+        return _center_crop_resize(img, W_IMG, H_ROW, bg_color=BG_COLOR)
+
     for res in sorted_res:
         if res.thumb_crop is None:
             continue
@@ -190,23 +511,13 @@ def _save_dashboard_rows(results: List, out_path: Path) -> None:
             if vals.size > 0:
                 z_range = float(np.max(vals) - np.min(vals))
 
+
+        kind = str(getattr(res, "height_map_kind", ""))
+        kind_s = kind.replace("triangulated", "tri").replace("pixel", "px").replace("_gate", "G")
+
         cv2.putText(panel, f"PA: {res.pa:.6f}", (10, 30), font, 0.7, (255, 255, 255), 1)
         cv2.putText(panel, f"Score: {res.breakdown.score:.3f}", (10, 60), font, 0.7, score_bgr, 1)
-        cv2.putText(panel, f"Pk-Pk: {z_range:.2f}px", (10, 90), font, 0.5, (150, 150, 150), 1)
-
-        def format_thumb(img):
-            h, w = img.shape[:2]
-            s = H_ROW / float(h)
-            new_w = int(w * s)
-            resized = cv2.resize(img, (new_w, H_ROW), interpolation=cv2.INTER_AREA)
-            out = np.zeros((H_ROW, W_IMG, 3), dtype=np.uint8)
-            out[:] = BG_COLOR
-            if new_w >= W_IMG:
-                start = (new_w - W_IMG) // 2
-                out = resized[:, start : start + W_IMG]
-            else:
-                out[:, 0:new_w] = resized
-            return out
+        cv2.putText(panel, f"Pk-Pk: {z_range:.2f}px | {kind_s}", (10, 90), font, 0.45, (150, 150, 150), 1)
 
         t_raw = format_thumb(res.thumb_crop)
         t_mask = format_thumb(res.thumb_mask)
@@ -229,15 +540,15 @@ def _save_dashboard_rows(results: List, out_path: Path) -> None:
         rows.append(np.full((BORDER, row_img.shape[1], 3), BORDER_COLOR, dtype=np.uint8))
 
     if not rows:
-        return
-    dashboard = np.vstack(rows)
-    cv2.imwrite(str(out_path), dashboard)
+        return None
+
+    return np.vstack(rows)
 
 
-def _save_dashboard_grid(results: List, out_path: Path) -> None:
-    """Grid overview for grid patterns: table + tiled heightmaps."""
+def _render_dashboard_grid(results: List) -> Optional[np.ndarray]:
+    """Grid overview body for grid patterns: table + tiled heightmaps."""
     if not results:
-        return
+        return None
 
     BORDER = 2
     BG_COLOR = (30, 30, 30)
@@ -246,12 +557,13 @@ def _save_dashboard_grid(results: List, out_path: Path) -> None:
 
     font = cv2.FONT_HERSHEY_SIMPLEX
 
-    # Determine grid extents.
-    placed = [r for r in results if getattr(r, "grid_row", None) is not None and getattr(r, "grid_col", None) is not None]
+    placed = [
+        r
+        for r in results
+        if getattr(r, "grid_row", None) is not None and getattr(r, "grid_col", None) is not None
+    ]
     if not placed:
-        # fallback
-        _save_dashboard_rows(results, out_path)
-        return
+        return None
 
     max_r = max(int(r.grid_row) for r in placed)
     max_c = max(int(r.grid_col) for r in placed)
@@ -260,7 +572,6 @@ def _save_dashboard_grid(results: List, out_path: Path) -> None:
 
     global_limit = _global_limit_from_results(results)
 
-    # Tile sizes: keep readable but not enormous.
     W_TILE = 220
     H_TILE = 140
     LABEL_H = 20
@@ -277,7 +588,6 @@ def _save_dashboard_grid(results: List, out_path: Path) -> None:
     thumbs_img = np.zeros((grid_h, thumbs_w, 3), dtype=np.uint8)
     thumbs_img[:] = BG_COLOR
 
-    # Place tiles.
     by_cell = {(int(r.grid_row), int(r.grid_col)): r for r in placed}
     for rr in range(nrows):
         for cc in range(ncols):
@@ -296,11 +606,9 @@ def _save_dashboard_grid(results: List, out_path: Path) -> None:
                 tile = np.zeros((H_TILE, W_TILE, 3), dtype=np.uint8)
                 tile[:] = (20, 20, 20)
 
-            # Label strip (top overlay).
             overlay = tile.copy()
             cv2.rectangle(overlay, (0, 0), (W_TILE - 1, LABEL_H), (0, 0, 0), -1)
-            alpha = 0.55
-            tile = cv2.addWeighted(overlay, alpha, tile, 1 - alpha, 0)
+            tile = cv2.addWeighted(overlay, 0.55, tile, 0.45, 0)
 
             if cell is not None:
                 score = float(cell.breakdown.score)
@@ -321,29 +629,10 @@ def _save_dashboard_grid(results: List, out_path: Path) -> None:
 
             grid_img[y0 : y0 + H_TILE, x0 : x0 + W_TILE] = tile
 
-    def format_thumb(img):
-        if img is None:
-            out = np.zeros((H_THUMB, W_THUMB, 3), dtype=np.uint8)
-            out[:] = BG_COLOR
-            return out
-        if img.ndim == 2:
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        h, w = img.shape[:2]
-        s = H_THUMB / float(h)
-        new_w = int(w * s)
-        resized = cv2.resize(img, (new_w, H_THUMB), interpolation=cv2.INTER_AREA)
-        out = np.zeros((H_THUMB, W_THUMB, 3), dtype=np.uint8)
-        out[:] = BG_COLOR
-        if new_w >= W_THUMB:
-            start = (new_w - W_THUMB) // 2
-            out = resized[:, start : start + W_THUMB]
-        else:
-            out[:, 0:new_w] = resized
-        return out
-
-    row_cells = {}
+    row_cells: Dict[int, List[Any]] = {}
     for r in placed:
         row_cells.setdefault(int(r.grid_row), []).append(r)
+
     mid_col = (ncols - 1) / 2.0
     for rr in range(nrows):
         row_candidates = row_cells.get(rr, [])
@@ -358,21 +647,25 @@ def _save_dashboard_grid(results: List, out_path: Path) -> None:
             getattr(chosen, "thumb_mask", None) if chosen is not None else None,
             getattr(chosen, "thumb_track", None) if chosen is not None else None,
         ]
+
         y0 = BORDER + rr * (H_TILE + BORDER)
         y_thumb = y0 + (H_TILE - H_THUMB) // 2
         x_thumb = BORDER
         for img in thumbs:
-            tile = format_thumb(img)
+            tile = _center_crop_resize(img, W_THUMB, H_THUMB, bg_color=BG_COLOR)
             thumbs_img[y_thumb : y_thumb + H_THUMB, x_thumb : x_thumb + W_THUMB] = tile
             x_thumb += W_THUMB + BORDER
 
     # Table block.
-    sorted_res = sorted(results, key=lambda r: (
-        1 if (getattr(r, "grid_row", None) is None or getattr(r, "grid_col", None) is None) else 0,
-        getattr(r, "grid_row", 0) or 0,
-        getattr(r, "grid_col", 0) or 0,
-        float(getattr(r, "pa", 0.0)),
-    ))
+    sorted_res = sorted(
+        results,
+        key=lambda r: (
+            1 if (getattr(r, "grid_row", None) is None or getattr(r, "grid_col", None) is None) else 0,
+            getattr(r, "grid_row", 0) or 0,
+            getattr(r, "grid_col", 0) or 0,
+            float(getattr(r, "pa", 0.0)),
+        ),
+    )
 
     W_TABLE = 360
     ROW_H = 22
@@ -380,27 +673,25 @@ def _save_dashboard_grid(results: List, out_path: Path) -> None:
     needed_h = HEADER_H + ROW_H * (len(sorted_res) + 1) + BORDER
     table_h = max(grid_h, needed_h)
 
-    if grid_img.shape[0] < table_h:
-        pad_h = table_h - grid_img.shape[0]
-        pad = np.zeros((pad_h, grid_img.shape[1], 3), dtype=np.uint8)
+    def _pad_h(img: np.ndarray, target_h: int) -> np.ndarray:
+        if img.shape[0] >= target_h:
+            return img
+        pad = np.zeros((target_h - img.shape[0], img.shape[1], 3), dtype=np.uint8)
         pad[:] = BG_COLOR
-        grid_img = np.vstack([grid_img, pad])
+        return np.vstack([img, pad])
 
-    if thumbs_img.shape[0] < table_h:
-        pad_h = table_h - thumbs_img.shape[0]
-        pad = np.zeros((pad_h, thumbs_img.shape[1], 3), dtype=np.uint8)
-        pad[:] = BG_COLOR
-        thumbs_img = np.vstack([thumbs_img, pad])
+    grid_img = _pad_h(grid_img, table_h)
+    thumbs_img = _pad_h(thumbs_img, table_h)
 
     table = np.zeros((table_h, W_TABLE, 3), dtype=np.uint8)
     table[:] = BG_COLOR
 
-    # Header
     cv2.rectangle(table, (0, 0), (W_TABLE - 1, HEADER_H), (20, 20, 20), -1)
     cv2.putText(table, "r,c", (8, 20), font, 0.5, TEXT_COLOR, 1, cv2.LINE_AA)
     cv2.putText(table, "p1", (70, 20), font, 0.5, TEXT_COLOR, 1, cv2.LINE_AA)
     cv2.putText(table, "p2", (160, 20), font, 0.5, TEXT_COLOR, 1, cv2.LINE_AA)
     cv2.putText(table, "score", (250, 20), font, 0.5, TEXT_COLOR, 1, cv2.LINE_AA)
+    cv2.putText(table, "k", (320, 20), font, 0.5, TEXT_COLOR, 1, cv2.LINE_AA)
 
     y = HEADER_H + ROW_H
     for r in sorted_res:
@@ -422,32 +713,26 @@ def _save_dashboard_grid(results: List, out_path: Path) -> None:
         cv2.putText(table, pa2_s, (160, y), font, 0.45, (200, 200, 200), 1, cv2.LINE_AA)
         cv2.putText(table, f"{score:.3f}", (250, y), font, 0.45, score_bgr, 1, cv2.LINE_AA)
 
+        kind = str(getattr(r, "height_map_kind", ""))
+        kind_s = kind.replace("triangulated", "tri").replace("pixel", "px").replace("_gate", "G")
+        cv2.putText(table, kind_s, (320, y), font, 0.42, (200, 200, 200), 1, cv2.LINE_AA)
+
         y += ROW_H
         if y + ROW_H > table_h:
             break
 
-    # Top line plot (score vs param1).
-    xs = [float(r.pa) for r in results]
-    ys = [float(r.breakdown.score) for r in results]
-    W_TOTAL = W_TABLE + BORDER + thumbs_w + BORDER + grid_w
-    H_PLOT = 220
-    plot = render_score_lineplot(xs, ys, width_px=W_TOTAL, height_px=H_PLOT)
-
     v_sep = np.full((table_h, BORDER, 3), BORDER_COLOR, dtype=np.uint8)
-    body = np.hstack([table, v_sep, thumbs_img, v_sep, grid_img])
-
-    h_sep = np.full((BORDER, W_TOTAL, 3), BORDER_COLOR, dtype=np.uint8)
-    out = np.vstack([plot, h_sep, body])
-
-    cv2.imwrite(str(out_path), out)
+    return np.hstack([table, v_sep, thumbs_img, v_sep, grid_img])
 
 
-def save_dashboard(results: List, out_path: Path) -> None:
+def save_dashboard(results: List, out_path: Path, *, debug: Optional[Dict[str, Any]] = None) -> None:
     """Save analysis overview image.
 
     For grid patterns (results containing grid_row/grid_col), the heightmaps are
     laid out as a grid (tiles) next to a summary table. For line patterns, the
     original per-line dashboard is used.
+
+    Additionally, a debug panel is included between the score plot and the body.
     """
     if not results:
         return
@@ -456,7 +741,29 @@ def save_dashboard(results: List, out_path: Path) -> None:
         (getattr(r, "grid_row", None) is not None and getattr(r, "grid_col", None) is not None)
         for r in results
     )
+
+    body: Optional[np.ndarray]
     if is_grid:
-        _save_dashboard_grid(results, out_path)
+        body = _render_dashboard_grid(results)
+        if body is None:
+            body = _render_dashboard_rows(results)
     else:
-        _save_dashboard_rows(results, out_path)
+        body = _render_dashboard_rows(results)
+
+    if body is None:
+        return
+
+    width = int(body.shape[1])
+
+    xs = [float(getattr(r, "pa", 0.0)) for r in results]
+    ys = [float(r.breakdown.score) for r in results]
+    plot = render_score_lineplot(xs, ys, width_px=width, height_px=220)
+
+    dbg = _render_debug_panel(results=results, debug=debug, width_px=width, height_px=220)
+
+    BORDER = 2
+    BORDER_COLOR = (100, 100, 100)
+    h_sep = np.full((BORDER, width, 3), BORDER_COLOR, dtype=np.uint8)
+
+    out = np.vstack([plot, h_sep, dbg, h_sep, body])
+    cv2.imwrite(str(out_path), out)

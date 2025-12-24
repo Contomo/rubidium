@@ -37,9 +37,6 @@ class RubidiumAnalyse:
         self.laser_bright_percentile = self.cv.get_float("laser_bright_percentile", -1.0, minval=-1.0, maxval=100.0)
         self.laser_weight_power = self.cv.get_float("laser_weight_power", 4.0, minval=1.0)
         self.laser_min_row_energy = self.cv.get_float("laser_min_row_energy", 1.0, minval=0.0)
-        self.laser_min_row_mask_px = self.cv.get_int("laser_min_row_mask_px", 1, minval=0)
-        self.laser_max_row_mask_px = self.cv.get_int("laser_max_row_mask_px", 0, minval=0)
-        self.laser_max_row_mask_frac = self.cv.get_float("laser_max_row_mask_frac", 0.2, minval=0.0, maxval=1.0)
         self.laser_median_ksize = self.cv.get_int("laser_median_ksize", 5, minval=0)
         self.laser_morph_ksize = self.cv.get_int("laser_morph_ksize", 3, minval=0)
 
@@ -57,6 +54,9 @@ class RubidiumAnalyse:
         self.camera_calibration = self.cv.get_str_opt("camera_calibration")
         self.laser_plane = self.cv.get_str_opt("laser_plane")
         self.bed_plane = self.cv.get_str_opt("bed_plane")
+        self.triangulate_min_valid_frac = self.cv.get_float("triangulate_min_valid_frac", 0.0, minval=0.0, maxval=1.0)
+        self.triangulate_min_height_range = self.cv.get_float("triangulate_min_height_range", 0.0, minval=0.0)
+        self.triangulate_gate_fail_score = self.cv.get_float("triangulate_gate_fail_score", 100.0, minval=0.0)
 
         self.gcode.register_command(
             "RUBIDIUM_ANALYSE",
@@ -72,6 +72,22 @@ class RubidiumAnalyse:
             if len(parts) < n: return None
             return tuple(cast(parts[i]) for i in range(n))
         except Exception: return None
+        
+    @staticmethod
+    def _format_best_value(best) -> str:
+        pa1 = float(getattr(best, "pa", 0.0))
+        score = float(getattr(getattr(best, "breakdown", None), "score", 0.0))
+        pa2 = getattr(best, "pa2", None)
+        rr = getattr(best, "grid_row", None)
+        cc = getattr(best, "grid_col", None)
+
+        if pa2 is None:
+            s = f"rubidium analyse: best-value={pa1:.6f} (score={score:.3f})"
+        else:
+            s = f"rubidium analyse: best-value={pa1:.6f},{float(pa2):.6f} (score={score:.3f})"
+        if rr is not None and cc is not None:
+            s += f" [r{int(rr)},c{int(cc)}]"
+        return s
 
     def _resolve_scan_dir(self, gcmd) -> Optional[Path]:
         self.paths.ensure_dirs()
@@ -101,7 +117,7 @@ class RubidiumAnalyse:
             return
 
         try:
-            from ..analysis.analyzer import AnalysisConfig, TriangulationConfig, analyze_session_json
+            from ..analysis.analyzer import AnalysisConfig, AutoCropConfig, TriangulationConfig, analyze_session_json
             from ..analysis.image_processing import CropConfig, LaserExtractConfig
         except ImportError:
             self.gcode.respond_info("rubidium: missing dependencies (opencv-python-headless, matplotlib, numpy)")
@@ -131,15 +147,12 @@ class RubidiumAnalyse:
             bright_percentile=float(self.laser_bright_percentile),
             weight_power=float(self.laser_weight_power),
             min_row_energy=float(self.laser_min_row_energy),
-            min_row_mask_px=int(self.laser_min_row_mask_px),
-            max_row_mask_px=int(self.laser_max_row_mask_px),
-            max_row_mask_frac=float(self.laser_max_row_mask_frac),
             median_ksize=int(self.laser_median_ksize),
             morph_ksize=int(self.laser_morph_ksize),
             use_clahe=bool(self.laser_use_clahe),
             blur_ksize=int(self.laser_blur_ksize),
             clahe_clip=float(self.laser_clahe_clip),
-            clahe_grid=tuple(int(v) for v in self.laser_clahe_grid),
+            clahe_grid=self.laser_clahe_grid, # type: ignore
         )
 
         tri = TriangulationConfig(
@@ -147,24 +160,33 @@ class RubidiumAnalyse:
             camera_calibration_path=self.camera_calibration,
             laser_plane_abcd=self._parse_nums(self.laser_plane, 4, float),
             bed_plane_abcd=self._parse_nums(self.bed_plane, 4, float),
+            min_valid_frac=float(self.triangulate_min_valid_frac),
+            min_height_range=float(self.triangulate_min_height_range),
+            gate_fail_score=float(self.triangulate_gate_fail_score),
         )
 
         pipeline_steps = None
         if self.analysis_pipeline is not None:
             pipeline_steps = [p.strip() for p in str(self.analysis_pipeline).replace("\n", " ").replace(",", " ").split() if p.strip()]
         cfg = AnalysisConfig(
-             crop=crop, laser=laser, triangulation=tri,
-             frame_step=int(self.frame_step), max_frames=int(self.max_frames),
-             write_plots=bool(self.write_plots), write_npz=bool(self.write_npz),
+            crop=crop,
+            laser=laser,
+            triangulation=tri,
+            autocrop=AutoCropConfig(
+                enable=bool(self.crop_auto_center),
+                search_wh=(int(css[0]), int(css[1])) if css else None,
+                samples_per_clip=int(self.crop_auto_center_samples_per_clip),
+                max_samples=int(self.crop_auto_center_max_samples),
+                keep_percentile=float(self.crop_auto_center_keep_percentile),
+                min_kept=int(self.crop_auto_center_min_kept),
+            ),
+            frame_step=int(self.frame_step),
+            max_frames=int(self.max_frames),
+            write_plots=bool(self.write_plots),
+            write_npz=bool(self.write_npz),
             output_dir=str(output_dir),
             pipeline_steps=pipeline_steps,
-            autocrop_enable=bool(self.crop_auto_center),
-            autocrop_search_wh=(int(css[0]), int(css[1])) if css else None,
-            autocrop_samples_per_clip=int(self.crop_auto_center_samples_per_clip),
-            autocrop_max_samples=int(self.crop_auto_center_max_samples),
-            autocrop_keep_percentile=float(self.crop_auto_center_keep_percentile),
-            autocrop_min_kept=int(self.crop_auto_center_min_kept),
-         )
+        )
 
         self.gcode.respond_info(f"rubidium: analyzing session {scan_dir.name}...")
         
@@ -195,23 +217,6 @@ class RubidiumAnalyse:
             return
 
         if summary.best:
-            pa1 = float(summary.best.pa)
-            pa2 = summary.best.pa2
-            score = float(summary.best.breakdown.score)
-            if pa2 is not None:
-                rr = summary.best.grid_row
-                cc = summary.best.grid_col
-                if rr is not None and cc is not None:
-                    self.gcode.respond_info(
-                        f"rubidium analyse: best-value={pa1:.6f},{float(pa2):.6f} (score={score:.3f}) [r{int(rr)},c{int(cc)}]"
-                    )
-                else:
-                    self.gcode.respond_info(
-                        f"rubidium analyse: best-value={pa1:.6f},{float(pa2):.6f} (score={score:.3f})"
-                    )
-            else:
-                self.gcode.respond_info(
-                    f"rubidium analyse: best-value={pa1:.6f} (score={score:.3f})"
-                )
+            self.gcode.respond_info(self._format_best_value(summary.best))
         else:
             self.gcode.respond_info("rubidium analyse complete, no clear winner.")

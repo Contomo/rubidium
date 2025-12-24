@@ -25,9 +25,6 @@ class LaserExtractConfig:
     bright_percentile: float = -1.0  # < 0 means "use Otsu path"
     weight_power: float = 4.0
     min_row_energy: float = 1.0
-    min_row_mask_px: int = 1
-    max_row_mask_px: int = 0  # 0 means "disabled"
-    max_row_mask_frac: float = 0.2  # 0 means "disabled"
 
     median_ksize: int = 5
     morph_ksize: int = 3
@@ -384,7 +381,6 @@ class StepStripeCentroidPerRow:
     def __call__(self, ctx: PipelineCtx) -> PipelineCtx:
         cfg = ctx.cfg_laser or LaserExtractConfig()
         assert ctx.gray_f32 is not None
-        assert ctx.mask_u8 is not None
 
         h, w = ctx.gray_f32.shape[:2]
         x = np.arange(w, dtype=np.float32)
@@ -393,18 +389,7 @@ class StepStripeCentroidPerRow:
         weights = np.power(np.clip(ctx.gray_f32, 0.0, None), pw)
 
         s = np.sum(weights, axis=1)
-        good_energy = s > float(cfg.min_row_energy)
-
-        row_mask_px = np.sum(ctx.mask_u8 > 0, axis=1).astype(np.int32)
-        good_mask = row_mask_px >= int(max(0, cfg.min_row_mask_px))
-        max_px = int(max(0, cfg.max_row_mask_px))
-        if max_px > 0:
-            good_mask &= row_mask_px <= max_px
-        max_frac = float(max(0.0, cfg.max_row_mask_frac))
-        if max_frac > 0.0:
-            good_mask &= row_mask_px <= (max_frac * float(w))
-
-        good = good_energy & good_mask
+        good = s > float(cfg.min_row_energy)
 
         out = np.full((h,), np.nan, dtype=np.float32)
         if np.any(good):
