@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple, List, Iterator
+from typing import Tuple, List, Iterator, Optional
 import math
 
 
@@ -37,6 +37,9 @@ class Line:
     end: Pt
     segments: Tuple[LineSegment, ...]
     
+    parameter_value2: Optional[float] = None
+    grid_row: Optional[int] = None
+    grid_col: Optional[int] = None
     def length_xy(self) -> float:
         dx = self.end.x - self.start.x
         dy = self.end.y - self.start.y
@@ -150,6 +153,9 @@ class Lines:
                     start=r_pt(ln.start),
                     end=r_pt(ln.end),
                     segments=tuple(new_segments),
+                    parameter_value2=getattr(ln, 'parameter_value2', None),
+                    grid_row=getattr(ln, 'grid_row', None),
+                    grid_col=getattr(ln, 'grid_col', None),
                 )
             )
         return Lines(lines=tuple(new_lines))

@@ -101,6 +101,11 @@ class RubidiumPrint(RubidiumBase):
             par = str(pat.settings.get("tuning_parameter", "ADVANCE"))
             s["tuning_fmt"] = self._compile_param_command_fmt(cmd, par)
 
+            cmd2 = str(pat.settings.get("tuning_command2", "")).strip()
+            par2 = str(pat.settings.get("tuning_parameter2", "")).strip()
+            if cmd2 and par2:
+                s["tuning_fmt2"] = self._compile_param_command_fmt(cmd2, par2)
+
         return s
 
     def _prepare_lines_for_run(self, lines: Lines, *, s: Dict[str, Any], gcmd, keepout_xy=None) -> Lines:
@@ -251,10 +256,19 @@ class RubidiumPrint(RubidiumBase):
         e_per_mm = (line_w * layer_h / filament_area) * flow
 
         tuning_fmt = str(settings.get("tuning_fmt", "SET_PRESSURE_ADVANCE ADVANCE=%0.9f"))
+        tuning_fmt2 = str(settings.get("tuning_fmt2", ""))
 
         for idx, pl in enumerate(lines):
             self.progress = idx / max(1, n)
-            ctx = self._tmpl_ctx(mode="print", s=settings, line=pl)
+            prev_line = lines[idx - 1] if idx > 0 else None
+            next_line = lines[idx + 1] if idx + 1 < n else None
+            ctx = self._tmpl_ctx(
+                mode="print",
+                s=settings,
+                line=pl,
+                previous_line=prev_line,
+                next_line=next_line,
+            )
 
             for ln in self._render_template_lines(
                 self.templates.before_line,
@@ -266,6 +280,13 @@ class RubidiumPrint(RubidiumBase):
             yield f"G0 X{pl.start.x + offx:.3f} Y{pl.start.y + offy:.3f} Z{pl.start.z + offz:.3f} F{fast_feed:.1f}"
 
             yield (tuning_fmt % (pl.parameter_value,))
+
+
+            if getattr(pl, "parameter_value2", None) is not None and tuning_fmt2:
+                yield (tuning_fmt2 % (pl.parameter_value2,))
+            elif tuning_fmt2:
+                self.gcode.respond_info("rubidium print: possibly a fucky wucky but im not sure if we should raise here tho")
+            
             yield "G90"
 
             for seg in pl.segments:

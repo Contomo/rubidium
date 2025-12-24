@@ -11,6 +11,24 @@ from typing import Optional, List, Tuple
 import numpy as np
 import cv2
 
+
+
+def _derive_mirror_x(clip: dict) -> bool:
+    """Derive whether to mirror the frame based on motion direction.
+
+    No explicit flag is stored; we infer from raw_start/raw_end coordinates.
+    For horizontal line scans this mirrors when travel is in -X.
+    """
+    rs = clip.get("raw_start") or clip.get("buf_start")
+    re_ = clip.get("raw_end") or clip.get("buf_end")
+    if not (isinstance(rs, (list, tuple)) and isinstance(re_, (list, tuple)) and len(rs) >= 2 and len(re_) >= 2):
+        return False
+    try:
+        return float(re_[0]) < float(rs[0])
+    except Exception:
+        return False
+
+
 from .image_processing import (
     CropConfig,
     LaserExtractConfig,
@@ -58,6 +76,12 @@ class LineAnalysis:
     pa: float
     breakdown: ScoreBreakdown
     height_map_kind: str
+
+    # grid patterns (optional)
+    pa2: Optional[float] = None
+    grid_row: Optional[int] = None
+    grid_col: Optional[int] = None
+
     height_map: Optional[np.ndarray] = None
     thumb_crop: Optional[np.ndarray] = None
     thumb_mask: Optional[np.ndarray] = None
@@ -65,6 +89,7 @@ class LineAnalysis:
     plot_path: Optional[Path] = None
     npz_path: Optional[Path] = None
     ok: bool = True
+
 
 
 @dataclass(slots=True)
@@ -100,11 +125,11 @@ def _load_camera_calibration(path: Path) -> CameraCalibration:
     return CameraCalibration(K=np.asarray(K, dtype=np.float32), dist=np.asarray(dist, dtype=np.float32))
 
 
-def analyze_video(path: Path, idx: int, pa: float, cfg: AnalysisConfig) -> LineAnalysis:
+def analyze_video(path: Path, idx: int, pa: float, cfg: AnalysisConfig, *, mirror_x: bool = False) -> LineAnalysis:
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         logging.warning(f"rubidium: failed to open video: {path}")
-        return LineAnalysis(path, idx, pa, ScoreBreakdown(float("inf"), float("inf"), 0.0, 1.0), "err", ok=False)
+        return LineAnalysis(video_path=path, idx=idx, pa=pa, breakdown=ScoreBreakdown(float("inf"), float("inf"), 0.0, 1.0), height_map_kind="err", ok=False)
 
     steps = build_laser_pipeline(cfg.pipeline_steps)
 
@@ -119,6 +144,8 @@ def analyze_video(path: Path, idx: int, pa: float, cfg: AnalysisConfig) -> LineA
 
     while True:
         ok, frame = cap.read()
+        if mirror_x:
+            frame = cv2.flip(frame, 1)
         if not ok:
             break
         frames += 1
@@ -165,7 +192,7 @@ def analyze_video(path: Path, idx: int, pa: float, cfg: AnalysisConfig) -> LineA
     cap.release()
 
     if not centers:
-        return LineAnalysis(path, idx, pa, ScoreBreakdown(float("inf"), float("inf"), 0.0, 1.0), "empty", ok=False)
+        return LineAnalysis(video_path=path, idx=idx, pa=pa, breakdown=ScoreBreakdown(float("inf"), float("inf"), 0.0, 1.0), height_map_kind="empty", ok=False)
 
     center_map = np.stack(centers, axis=0).astype(np.float32)
     baseline = np.nanmedian(center_map, axis=0)
@@ -246,9 +273,32 @@ def analyze_session_json(json_path: Path, cfg: AnalysisConfig) -> AnalysisSummar
 
         idx = int(clip.get("idx", -1))
         pa = float(clip.get("parameter_value", 0.0))
+        pa2_raw = clip.get("parameter_value2", None)
+        pa2 = None
+        if pa2_raw is not None:
+            try:
+                pa2 = float(pa2_raw)
+            except Exception:
+                pa2 = None
 
-        res = analyze_video(vid_path, idx, pa, cfg)
+        gr_raw = clip.get("grid_row", None)
+        gc_raw = clip.get("grid_col", None)
+        grid_row = None
+        grid_col = None
+        try:
+            if gr_raw is not None: grid_row = int(gr_raw)
+        except Exception:
+            grid_row = None
+        try:
+            if gc_raw is not None: grid_col = int(gc_raw)
+        except Exception:
+            grid_col = None
+        mirror_x = _derive_mirror_x(clip)
+        res = analyze_video(vid_path, idx, pa, cfg, mirror_x=mirror_x)
         if res.ok:
+            res.pa2 = pa2
+            res.grid_row = grid_row
+            res.grid_col = grid_col
             results.append(res)
 
     results.sort(key=lambda r: r.pa)

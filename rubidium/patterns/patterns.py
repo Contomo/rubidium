@@ -127,78 +127,304 @@ class PatternType:
 
     def build_keepout(self, *, settings: Dict[str, Any], segments: List[Tuple[str, float]]) -> Optional[Lines]:
         raise NotImplementedError
-    
+
     def build(self, *, settings: Dict[str, Any], segments: List[Tuple[str, float]]) -> Lines:
         raise NotImplementedError
 
 
+def _ctx_bed_center_x(ctx: Dict[str, Any]) -> float:
+    return float(ctx.get("bed_center_x", 0.0))
+
+
+def _ctx_bed_center_y(ctx: Dict[str, Any]) -> float:
+    return float(ctx.get("bed_center_y", 0.0))
+
+
+def _param_at(idx: int, count: int, start: float, stop: float) -> float:
+    n = max(1, int(count))
+    if n <= 1:
+        return float(start)
+    t = float(idx) / float(n - 1)
+    return float(start) + (float(stop) - float(start)) * t
+
+
+def _build_segments_x(
+    *,
+    x_left: float,
+    y: float,
+    z: float,
+    line_length: float,
+    segments: List[Tuple[str, float]],
+    reverse: bool,
+) -> Tuple[LineSegment, ...]:
+    segs: List[LineSegment] = []
+    ll = float(line_length)
+
+    if not segments:
+        segments = [("segment", 1.0)]
+
+    if not reverse:
+        x_cur = float(x_left)
+        for tag, ratio in segments:
+            seg_len = ll * float(ratio)
+            x_next = x_cur + seg_len
+            segs.append(
+                LineSegment(
+                    start=Pt(x_cur, y, z),
+                    end=Pt(x_next, y, z),
+                    speed_label=str(tag),
+                )
+            )
+            x_cur = x_next
+        return tuple(segs)
+
+    # reverse: start at right and walk left
+    x_cur = float(x_left) + ll
+    for tag, ratio in segments:
+        seg_len = ll * float(ratio)
+        x_next = x_cur - seg_len
+        segs.append(
+            LineSegment(
+                start=Pt(x_cur, y, z),
+                end=Pt(x_next, y, z),
+                speed_label=str(tag),
+            )
+        )
+        x_cur = x_next
+    return tuple(segs)
+
+
 class LinesPatternType(PatternType):
+    @classmethod
+    def options_spec(cls) -> Tuple[OptSpec, ...]:
+        return (
+            OptSpec("param_start", "float", "PARAM_START", 0.0),
+            OptSpec("param_stop", "float", "PARAM_STOP", 0.1),
+            OptSpec("param_count", "int", "PARAM_COUNT", 10, minval=1),
+            OptSpec("tuning_command", "str", "TUNING_COMMAND", "SET_PRESSURE_ADVANCE"),
+            OptSpec("tuning_parameter", "str", "TUNING_PARAMETER", "ADVANCE"),
+            OptSpec("origin_x", "float", "ORIGIN_X", _ctx_bed_center_x),
+            OptSpec("origin_y", "float", "ORIGIN_Y", _ctx_bed_center_y),
+            OptSpec("origin_z", "float", "ORIGIN_Z", 0.0),
+            OptSpec("layer_height", "float", "LAYER_HEIGHT", 0.2, above=0.0),
+            OptSpec("line_length", "float", "LINE_LENGTH", 30.0, above=0.0),
+            OptSpec("line_spacing", "float", "LINE_SPACING", 3.0, above=0.0),
+        )
+
+    def __init__(self) -> None:
+        super().__init__("lines", options=self.options_spec())
+
+    def _reverse_for_idx(self, idx: int) -> bool:
+        return False
+
     def build(self, *, settings: Dict[str, Any], segments: List[Tuple[str, float]]) -> Lines:
-        param_start  = float(settings["param_start"])
-        param_stop   = float(settings["param_stop"])
-        param_count  = int(settings["param_count"])
-        origin_x     = float(settings["origin_x"])
-        origin_y     = float(settings["origin_y"])
-        origin_z     = float(settings["origin_z"])
-        line_length  = float(settings["line_length"])
+        param_start = float(settings["param_start"])
+        param_stop = float(settings["param_stop"])
+        param_count = int(settings["param_count"])
+        origin_x = float(settings["origin_x"])
+        origin_y = float(settings["origin_y"])
+        origin_z = float(settings["origin_z"])
+        line_length = float(settings["line_length"])
         line_spacing = float(settings["line_spacing"])
 
         count = max(1, param_count)
         lines_list: List[Line] = []
         for idx in range(count):
-            if count > 1:
-                pa = param_start + (param_stop - param_start) * (idx / (count - 1))
-            else:
-                pa = param_start
-
+            pa = _param_at(idx, count, param_start, param_stop)
             y = origin_y + line_spacing * idx
-            start_pt = Pt(origin_x, y, origin_z)
-            end_pt = Pt(origin_x + line_length, y, origin_z)
 
-            segs: List[LineSegment] = []
-            x0 = origin_x
-            for tag, ratio in segments:
-                seg_len = line_length * float(ratio)
-                x1 = x0 + seg_len
-                seg_start = Pt(x0, y, origin_z)
-                seg_end = Pt(x1, y, origin_z)
-                segs.append(LineSegment(seg_start, seg_end, str(tag)))
-                x0 = x1
+            reverse = self._reverse_for_idx(idx)
+            start_pt = Pt(origin_x + (line_length if reverse else 0.0), y, origin_z)
+            end_pt = Pt(origin_x + (0.0 if reverse else line_length), y, origin_z)
 
-            lines_list.append(Line(idx=idx, parameter_value=pa, start=start_pt, end=end_pt, segments=tuple(segs)))
+            segs = _build_segments_x(
+                x_left=origin_x,
+                y=y,
+                z=origin_z,
+                line_length=line_length,
+                segments=segments,
+                reverse=reverse,
+            )
+
+            lines_list.append(
+                Line(
+                    idx=idx,
+                    parameter_value=pa,
+                    start=start_pt,
+                    end=end_pt,
+                    segments=segs,
+                )
+            )
         return Lines(tuple(lines_list))
-    
+
     def build_keepout(self, *, settings: Dict[str, Any], segments: List[Tuple[str, float]]) -> Lines:
         s2 = dict(settings)
         s2["param_count"] = int(settings["param_count"]) + 2
         s2["origin_y"] = float(settings["origin_y"]) - float(settings["line_spacing"])
         return self.build(settings=s2, segments=segments)
 
-def _bed_center_x(ctx: Dict[str, Any]) -> float: # TODO lambda this
-    return float(ctx.get("bed_center_x", 0.0))
+
+class LinesFastPatternType(LinesPatternType):
+    """Like 'lines', but with a directional pattern to reduce long return moves."""
+
+    _DIR_PATTERN = "LRRLLR"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = "lines_fast"
+
+    def _reverse_for_idx(self, idx: int) -> bool:
+        pat = self._DIR_PATTERN
+        ch = pat[idx % len(pat)].upper()
+        return ch == "R"
 
 
-def _bed_center_y(ctx: Dict[str, Any]) -> float: # TODO lambda this
-    return float(ctx.get("bed_center_y", 0.0))
+class GridPatternBase(PatternType):
+    @classmethod
+    def options_spec(cls) -> Tuple[OptSpec, ...]:
+        return (
+            OptSpec("param_start", "float", "PARAM_START", 0.0),
+            OptSpec("param_stop", "float", "PARAM_STOP", 0.1),
+            OptSpec("param_count", "int", "PARAM_COUNT", 5, minval=1),
+            OptSpec("param2_start", "float", "PARAM2_START", 0.0),
+            OptSpec("param2_stop", "float", "PARAM2_STOP", 0.1),
+            OptSpec("param2_count", "int", "PARAM2_COUNT", 5, minval=1),
+            OptSpec("tuning_command", "str", "TUNING_COMMAND", "SET_PRESSURE_ADVANCE"),
+            OptSpec("tuning_parameter", "str", "TUNING_PARAMETER", "ADVANCE"),
+            OptSpec("tuning_command2", "str", "TUNING_COMMAND2", ""),
+            OptSpec("tuning_parameter2", "str", "TUNING_PARAMETER2", ""),
+            OptSpec("origin_x", "float", "ORIGIN_X", _ctx_bed_center_x),
+            OptSpec("origin_y", "float", "ORIGIN_Y", _ctx_bed_center_y),
+            OptSpec("origin_z", "float", "ORIGIN_Z", 0.0),
+            OptSpec("layer_height", "float", "LAYER_HEIGHT", 0.2, above=0.0),
+            OptSpec("line_length", "float", "LINE_LENGTH", 12.0, above=0.0),
+            OptSpec("grid_spacing_x", "float", "GRID_SPACING_X", 15.0, above=0.0),
+            OptSpec("grid_spacing_y", "float", "GRID_SPACING_Y", 4.0, above=0.0),
+        )
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name, options=self.options_spec())
+
+    def _snake_for_row(self, row: int) -> bool:
+        return False
+
+    def build(self, *, settings: Dict[str, Any], segments: List[Tuple[str, float]]) -> Lines:
+        p1_start = float(settings["param_start"])
+        p1_stop = float(settings["param_stop"])
+        cols = max(1, int(settings["param_count"]))
+
+        p2_start = float(settings["param2_start"])
+        p2_stop = float(settings["param2_stop"])
+        rows = max(1, int(settings["param2_count"]))
+
+        origin_x = float(settings["origin_x"])
+        origin_y = float(settings["origin_y"])
+        origin_z = float(settings["origin_z"])
+
+        line_length = float(settings["line_length"])
+        dx = float(settings["grid_spacing_x"])
+        dy = float(settings["grid_spacing_y"])
+
+        lines_list: List[Line] = []
+        for r in range(rows):
+            snake = self._snake_for_row(r)
+            cols_iter = range(cols - 1, -1, -1) if snake else range(cols)
+            for c in cols_iter:
+                pa1 = _param_at(c, cols, p1_start, p1_stop)
+                pa2 = _param_at(r, rows, p2_start, p2_stop)
+
+                x_left = origin_x + dx * c
+                y = origin_y + dy * r
+
+                reverse = bool(snake)  # snake rows print right->left for continuity
+                start_pt = Pt(x_left + (line_length if reverse else 0.0), y, origin_z)
+                end_pt = Pt(x_left + (0.0 if reverse else line_length), y, origin_z)
+
+                segs = _build_segments_x(
+                    x_left=x_left,
+                    y=y,
+                    z=origin_z,
+                    line_length=line_length,
+                    segments=segments,
+                    reverse=reverse,
+                )
+
+                lines_list.append(
+                    Line(
+                        idx=len(lines_list),
+                        parameter_value=pa1,
+                        parameter_value2=pa2,
+                        start=start_pt,
+                        end=end_pt,
+                        segments=segs,
+                        grid_row=r,
+                        grid_col=c,
+                    )
+                )
+
+        return Lines(tuple(lines_list))
+
+    def build_keepout(self, *, settings: Dict[str, Any], segments: List[Tuple[str, float]]) -> Lines:
+        cols = max(1, int(settings["param_count"]))
+        rows = max(1, int(settings["param2_count"]))
+
+        origin_x = float(settings["origin_x"])
+        origin_y = float(settings["origin_y"])
+        origin_z = float(settings["origin_z"])
+        line_length = float(settings["line_length"])
+
+        dx = float(settings["grid_spacing_x"])
+        dy = float(settings["grid_spacing_y"])
+
+        width = (cols - 1) * dx + line_length
+        height = (rows - 1) * dy
+
+        mx = dx
+        my = dy
+
+        x0 = origin_x - mx
+        x1 = origin_x + width + mx
+        y0 = origin_y - my
+        y1 = origin_y + height + my
+
+        def mk_line(i: int, x_a: float, y_a: float, x_b: float, y_b: float) -> Line:
+            a = Pt(x_a, y_a, origin_z)
+            b = Pt(x_b, y_b, origin_z)
+            seg = LineSegment(start=a, end=b, speed_label="keepout")
+            return Line(idx=i, parameter_value=0.0, start=a, end=b, segments=(seg,))
+
+        return Lines(
+            (
+                mk_line(0, x0, y0, x1, y0),
+                mk_line(1, x1, y0, x1, y1),
+                mk_line(2, x1, y1, x0, y1),
+                mk_line(3, x0, y1, x0, y0),
+            )
+        )
+
+
+class GridFastPatternType(GridPatternBase):
+    """Grid with snake ordering (row 0 left->right, row 1 right->left, ...)."""
+
+    def __init__(self) -> None:
+        super().__init__("grid_fast")
+
+    def _snake_for_row(self, row: int) -> bool:
+        return (row % 2) == 1
+
+
+class GridPatternType(GridPatternBase):
+    """Grid with constant left->right ordering (like 'lines')."""
+
+    def __init__(self) -> None:
+        super().__init__("grid")
 
 
 PATTERN_SPECS: Dict[str, PatternType] = {
-    "lines": LinesPatternType(
-        "lines",
-        options=( # TODO : Move this into the actual LinesPatternType class as a function that returns this instead, it is specific to the class and belongs in there
-            OptSpec("param_start", "float", "PARAM_START", 0.0),
-            OptSpec("param_stop", "float", "PARAM_STOP", 0.1),
-            OptSpec("param_count", "int", "PARAM_COUNT", 10, minval=1),
-            OptSpec("tuning_command", "str", "TUNING_COMMAND", "SET_PRESSURE_ADVANCE"),
-            OptSpec("tuning_parameter", "str", "TUNING_PARAMETER", "ADVANCE"),
-            OptSpec("origin_x", "float", "ORIGIN_X", _bed_center_x),
-            OptSpec("origin_y", "float", "ORIGIN_Y", _bed_center_y),
-            OptSpec("origin_z", "float", "ORIGIN_Z", 0.0),
-            OptSpec("layer_height", "float", "LAYER_HEIGHT", 0.2, above=0.0),
-            OptSpec("line_length", "float", "LINE_LENGTH", 30.0, above=0.0),
-            OptSpec("line_spacing", "float", "LINE_SPACING", 3.0, above=0.0),
-        ),
-    )
+    "lines": LinesPatternType(),
+    "lines_fast": LinesFastPatternType(),
+    "grid": GridPatternType(),
+    "grid_fast": GridFastPatternType(),
 }
 
 
@@ -247,7 +473,7 @@ class RubidiumPatternObject:
         existing = root.lookup_pattern(pname, None) if root is not None else None
         default_obj = root.lookup_pattern("default", None) if root is not None else None
 
-        fallback_name = None
+        fallback_name = None if pname != "default" else "lines"
         if existing is not None:
             fallback_name = existing.ptype.name
         elif default_obj is not None:
@@ -263,15 +489,6 @@ class RubidiumPatternObject:
             raise config.error(
                 f"Unknown pattern type '{ptype_name}'. Known patterns: {', '.join(sorted(PATTERN_SPECS.keys()))}"
             )
-        elif existing is not None:
-            ptype = existing.ptype
-        elif default_obj is not None:  # TODO: clean this a tad
-            ptype = default_obj.ptype
-        else:
-            if pname == "default":
-                ptype = PATTERN_SPECS["lines"]
-            else:
-                raise config.error(f"[{sec_name}] missing required 'pattern' (e.g. pattern: lines)")
 
         settings: Dict[str, Any] = {}
         ctx0 = {"bed_center_x": 0.0, "bed_center_y": 0.0}

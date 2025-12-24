@@ -168,6 +168,8 @@ class RubidiumBase:
         mode: str,
         s: Optional[Dict[str, Any]] = None,
         line: Optional[Line] = None,
+        previous_line: Optional[Line] = None,
+        next_line: Optional[Line] = None,
         scan: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build a context dictionary for template rendering."""
@@ -181,6 +183,8 @@ class RubidiumBase:
             "scan_speed":   pick("scan_speed", self.v_travel),
             "scan_buffer":  pick("scan_buffer", 0.0),
             "line": line,
+            "previous_line": previous_line,
+            "next_line": next_line,
             "pattern": s.get("pattern"),
             "pattern_settings": s.get("pattern_settings", {}),
             "pattern_segments": s.get("pattern_segments", []),

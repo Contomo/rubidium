@@ -155,7 +155,7 @@ class VideoInput:
         self.engine.start()
 
         self._session_start_pt: Optional[float] = None
-        self._active_marks: Dict[str, float] = {} 
+        self._active_marks: Dict[str, Tuple[float, Dict[str, Any]]] = {} 
         self._old_latency_s: Optional[float] = None
         self._current_outdir: Optional[Path] = None
 
@@ -282,11 +282,12 @@ class VideoInput:
             self.engine.submit(CmdLogMark(mark_data))
 
             if pl["kind"] == "start":
-                self._active_marks[pl["key"]] = t_s
+                self._active_marks[pl["key"]] = (t_s, dict(pl.get("meta", {}) or {}))
                 
             elif pl["kind"] == "end":
-                start_ts = self._active_marks.pop(pl["key"], None)
-                if start_ts is not None and self._current_outdir:
+                mark = self._active_marks.pop(pl["key"], None)
+                if mark is not None and self._current_outdir:
+                    start_ts, start_meta = mark
                     duration = t_s - start_ts
                     
                     out_name = f"{self.video_cut_filename}_{pl['idx']:03d}.mp4"
@@ -299,6 +300,8 @@ class VideoInput:
                         "start": start_ts,
                         "end": t_s
                     }
+                    if start_meta:
+                        clip_meta.update(start_meta)
                     if pl["meta"]:
                         clip_meta.update(pl["meta"])
 

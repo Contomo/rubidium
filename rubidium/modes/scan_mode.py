@@ -93,10 +93,14 @@ class RubidiumScan(RubidiumBase):
             bex = ex + ux * buf
             bey = ey + uy * buf
 
+            prev_line = lines[i - 1] if i > 0 else None
+            next_line = lines[i + 1] if i + 1 < n else None
             scan_ctx = self._tmpl_ctx(
                 mode="scan",
                 s=s,
                 line=pl,
+                previous_line=prev_line,
+                next_line=next_line,
                 scan={
                     "buf_start": Pt(bsx, bsy, sz),
                     "buf_end":   Pt(bex, bey, sz),
@@ -123,6 +127,9 @@ class RubidiumScan(RubidiumBase):
                 key=line_key,
                 meta={
                     "parameter_value": float(pl.parameter_value),
+                    "parameter_value2": (float(pl.parameter_value2) if getattr(pl, "parameter_value2", None) is not None else None),
+                    "grid_row": getattr(pl, "grid_row", None),
+                    "grid_col": getattr(pl, "grid_col", None),
                     "raw_start": [sx, sy, sz],
                     "raw_end": [ex, ey, sz],
                     "buf_start": [bsx, bsy, sz],
@@ -137,6 +144,9 @@ class RubidiumScan(RubidiumBase):
                 key=line_key,
                 meta={
                     "parameter_value": float(pl.parameter_value),
+                    "parameter_value2": (float(pl.parameter_value2) if getattr(pl, "parameter_value2", None) is not None else None),
+                    "grid_row": getattr(pl, "grid_row", None),
+                    "grid_col": getattr(pl, "grid_col", None),
                 },
             )
 
