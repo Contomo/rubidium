@@ -37,6 +37,9 @@ class RubidiumAnalyse:
         self.laser_bright_percentile = self.cv.get_float("laser_bright_percentile", -1.0, minval=-1.0, maxval=100.0)
         self.laser_weight_power = self.cv.get_float("laser_weight_power", 4.0, minval=1.0)
         self.laser_min_row_energy = self.cv.get_float("laser_min_row_energy", 1.0, minval=0.0)
+        self.laser_min_row_mask_px = self.cv.get_int("laser_min_row_mask_px", 1, minval=0)
+        self.laser_max_row_mask_px = self.cv.get_int("laser_max_row_mask_px", 0, minval=0)
+        self.laser_max_row_mask_frac = self.cv.get_float("laser_max_row_mask_frac", 0.2, minval=0.0, maxval=1.0)
         self.laser_median_ksize = self.cv.get_int("laser_median_ksize", 5, minval=0)
         self.laser_morph_ksize = self.cv.get_int("laser_morph_ksize", 3, minval=0)
 
@@ -128,6 +131,9 @@ class RubidiumAnalyse:
             bright_percentile=float(self.laser_bright_percentile),
             weight_power=float(self.laser_weight_power),
             min_row_energy=float(self.laser_min_row_energy),
+            min_row_mask_px=int(self.laser_min_row_mask_px),
+            max_row_mask_px=int(self.laser_max_row_mask_px),
+            max_row_mask_frac=float(self.laser_max_row_mask_frac),
             median_ksize=int(self.laser_median_ksize),
             morph_ksize=int(self.laser_morph_ksize),
             use_clahe=bool(self.laser_use_clahe),

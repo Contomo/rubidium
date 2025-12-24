@@ -264,12 +264,18 @@ def _save_dashboard_grid(results: List, out_path: Path) -> None:
     W_TILE = 220
     H_TILE = 140
     LABEL_H = 20
+    W_THUMB = 100
+    H_THUMB = 120
 
     grid_w = ncols * W_TILE + (ncols + 1) * BORDER
     grid_h = nrows * H_TILE + (nrows + 1) * BORDER
 
     grid_img = np.zeros((grid_h, grid_w, 3), dtype=np.uint8)
     grid_img[:] = BG_COLOR
+
+    thumbs_w = 3 * W_THUMB + 4 * BORDER
+    thumbs_img = np.zeros((grid_h, thumbs_w, 3), dtype=np.uint8)
+    thumbs_img[:] = BG_COLOR
 
     # Place tiles.
     by_cell = {(int(r.grid_row), int(r.grid_col)): r for r in placed}
@@ -315,6 +321,51 @@ def _save_dashboard_grid(results: List, out_path: Path) -> None:
 
             grid_img[y0 : y0 + H_TILE, x0 : x0 + W_TILE] = tile
 
+    def format_thumb(img):
+        if img is None:
+            out = np.zeros((H_THUMB, W_THUMB, 3), dtype=np.uint8)
+            out[:] = BG_COLOR
+            return out
+        if img.ndim == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        h, w = img.shape[:2]
+        s = H_THUMB / float(h)
+        new_w = int(w * s)
+        resized = cv2.resize(img, (new_w, H_THUMB), interpolation=cv2.INTER_AREA)
+        out = np.zeros((H_THUMB, W_THUMB, 3), dtype=np.uint8)
+        out[:] = BG_COLOR
+        if new_w >= W_THUMB:
+            start = (new_w - W_THUMB) // 2
+            out = resized[:, start : start + W_THUMB]
+        else:
+            out[:, 0:new_w] = resized
+        return out
+
+    row_cells = {}
+    for r in placed:
+        row_cells.setdefault(int(r.grid_row), []).append(r)
+    mid_col = (ncols - 1) / 2.0
+    for rr in range(nrows):
+        row_candidates = row_cells.get(rr, [])
+        chosen = None
+        if row_candidates:
+            with_thumbs = [c for c in row_candidates if c.thumb_crop is not None]
+            pick_from = with_thumbs or row_candidates
+            chosen = min(pick_from, key=lambda c: abs(int(c.grid_col) - mid_col))
+
+        thumbs = [
+            getattr(chosen, "thumb_crop", None) if chosen is not None else None,
+            getattr(chosen, "thumb_mask", None) if chosen is not None else None,
+            getattr(chosen, "thumb_track", None) if chosen is not None else None,
+        ]
+        y0 = BORDER + rr * (H_TILE + BORDER)
+        y_thumb = y0 + (H_TILE - H_THUMB) // 2
+        x_thumb = BORDER
+        for img in thumbs:
+            tile = format_thumb(img)
+            thumbs_img[y_thumb : y_thumb + H_THUMB, x_thumb : x_thumb + W_THUMB] = tile
+            x_thumb += W_THUMB + BORDER
+
     # Table block.
     sorted_res = sorted(results, key=lambda r: (
         1 if (getattr(r, "grid_row", None) is None or getattr(r, "grid_col", None) is None) else 0,
@@ -334,6 +385,12 @@ def _save_dashboard_grid(results: List, out_path: Path) -> None:
         pad = np.zeros((pad_h, grid_img.shape[1], 3), dtype=np.uint8)
         pad[:] = BG_COLOR
         grid_img = np.vstack([grid_img, pad])
+
+    if thumbs_img.shape[0] < table_h:
+        pad_h = table_h - thumbs_img.shape[0]
+        pad = np.zeros((pad_h, thumbs_img.shape[1], 3), dtype=np.uint8)
+        pad[:] = BG_COLOR
+        thumbs_img = np.vstack([thumbs_img, pad])
 
     table = np.zeros((table_h, W_TABLE, 3), dtype=np.uint8)
     table[:] = BG_COLOR
@@ -372,12 +429,12 @@ def _save_dashboard_grid(results: List, out_path: Path) -> None:
     # Top line plot (score vs param1).
     xs = [float(r.pa) for r in results]
     ys = [float(r.breakdown.score) for r in results]
-    W_TOTAL = W_TABLE + BORDER + grid_w
+    W_TOTAL = W_TABLE + BORDER + thumbs_w + BORDER + grid_w
     H_PLOT = 220
     plot = render_score_lineplot(xs, ys, width_px=W_TOTAL, height_px=H_PLOT)
 
     v_sep = np.full((table_h, BORDER, 3), BORDER_COLOR, dtype=np.uint8)
-    body = np.hstack([table, v_sep, grid_img])
+    body = np.hstack([table, v_sep, thumbs_img, v_sep, grid_img])
 
     h_sep = np.full((BORDER, W_TOTAL, 3), BORDER_COLOR, dtype=np.uint8)
     out = np.vstack([plot, h_sep, body])

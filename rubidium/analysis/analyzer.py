@@ -132,6 +132,269 @@ def _load_camera_calibration(path: Path) -> CameraCalibration:
     return CameraCalibration(K=np.asarray(K, dtype=np.float32), dist=np.asarray(dist, dtype=np.float32))
 
 
+
+
+def _ac_sample_frame_indices(total: int, n: int) -> List[int]:
+    """Pick n representative frame indices from a clip."""
+    if total <= 0:
+        return [0] * max(1, n)
+    if n <= 1:
+        return [max(0, total // 2)]
+    # Spread samples across the middle band to avoid fade-in/out and seeking quirks.
+    lo = int(round(total * 0.20))
+    hi = int(round(total * 0.80))
+    hi = max(lo + 1, min(total - 1, hi))
+    idxs: List[int] = []
+    for i in range(n):
+        t = (i + 1) / float(n + 1)
+        idxs.append(int(round(lo + (hi - lo) * t)))
+    return idxs
+
+
+def _ac_read_frame_at(cap: cv2.VideoCapture, target_idx: int) -> Optional[np.ndarray]:
+    """Try to seek+read a specific frame index; fall back to sequential read."""
+    if target_idx < 0:
+        target_idx = 0
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, float(target_idx))
+        ok, fr = cap.read()
+        if ok and fr is not None:
+            return fr
+    except Exception:
+        pass
+
+    # Fallback: rewind and step.
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0.0)
+    except Exception:
+        return None
+
+    i = 0
+    while True:
+        ok, fr = cap.read()
+        if not ok:
+            return None
+        if i >= target_idx:
+            return fr
+        i += 1
+
+
+def _maybe_autocrop_session(session_dir: Path, clips: List[dict], cfg: AnalysisConfig, outdir: Path, warnings: List[str]) -> None:
+    """Compute a single crop center for the whole session and persist debug artifacts."""
+    old_center_xy = cfg.crop.center_xy
+    if not cfg.autocrop_enable:
+        return
+    search_wh_cfg = cfg.autocrop_search_wh
+    search_wh_valid = bool(search_wh_cfg and search_wh_cfg[0] > 0 and search_wh_cfg[1] > 0)
+    if not search_wh_valid:
+        warnings.append("autocrop: crop_search_size missing/invalid; using full frame for search.")
+
+    outdir.mkdir(parents=True, exist_ok=True)
+    apath = outdir / "autocrop.json"
+    pts_path = outdir / "autocrop_points.csv"
+    preview_path = outdir / "autocrop_preview.jpg"
+    final_path = outdir / "autocrop_final.jpg"
+    mask_path = outdir / "autocrop_mask.jpg"
+
+    # Collect candidate centers (in full-frame pixels) and later convert to cfg space.
+    samples = []
+    best_debug = None  # (frame_full_bgr, search_crop_bgr, mask_u8, joint_local_xy, search_off_xy, score, mirror_x, clip_idx, frame_idx)
+
+    total_samples = 0
+    search_wh_used: Optional[Tuple[int, int]] = None
+    for clip_idx, clip in enumerate(clips):
+        vp = clip.get("path")
+        if not vp:
+            continue
+        vid_path = (session_dir / vp).resolve()
+        if not vid_path.exists():
+            continue
+
+        mirror_x = _derive_mirror_x(clip)
+
+        cap = cv2.VideoCapture(str(vid_path))
+        if not cap.isOpened():
+            continue
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        frame_idxs = _ac_sample_frame_indices(total, int(max(1, cfg.autocrop_samples_per_clip)))
+
+        for fi in frame_idxs:
+            if cfg.autocrop_max_samples and total_samples >= cfg.autocrop_max_samples:
+                break
+            total_samples += 1
+
+            fr = _ac_read_frame_at(cap, fi)
+            if fr is None:
+                continue
+            if mirror_x:
+                fr = cv2.flip(fr, 1)
+
+            search_wh = (int(search_wh_cfg[0]), int(search_wh_cfg[1])) if search_wh_valid else (int(fr.shape[1]), int(fr.shape[0]))
+
+            if search_wh_used is None:
+                search_wh_used = (int(search_wh[0]), int(search_wh[1]))
+            search_cfg = CropConfig(center_xy=cfg.crop.center_xy, wh=search_wh, ref_wh=cfg.crop.ref_wh)
+            search_crop, search_off = crop_frame(fr, search_cfg)
+
+            joint_xy, score, mask_u8 = detect_laser_joint(search_crop, cfg.laser)
+            if joint_xy is None or not np.isfinite(score) or score <= 0.0:
+                samples.append((clip_idx, fi, mirror_x, float("nan"), float("nan"), float(score)))
+                continue
+
+            cx_full = float(search_off[0]) + float(joint_xy[0])
+            cy_full = float(search_off[1]) + float(joint_xy[1])
+
+            samples.append((clip_idx, fi, mirror_x, cx_full, cy_full, float(score)))
+
+            if best_debug is None or float(score) > float(best_debug[5]):
+                best_debug = (fr.copy(), search_crop.copy(), mask_u8.copy(), (float(joint_xy[0]), float(joint_xy[1])),
+                              (int(search_off[0]), int(search_off[1])), float(score), mirror_x, clip_idx, fi)
+
+        cap.release()
+        if cfg.autocrop_max_samples and total_samples >= cfg.autocrop_max_samples:
+            break
+
+    if not samples:
+        warnings.append("autocrop: no samples collected; skipping.")
+        return
+
+    # Write raw sample list for debugging
+    try:
+        import csv as _csv
+        with pts_path.open("w", newline="") as f:
+            w = _csv.writer(f)
+            w.writerow(["clip_idx", "frame_idx", "mirror_x", "cx_full_px", "cy_full_px", "score"])
+            for row in samples:
+                w.writerow(list(row))
+    except Exception as e:
+        warnings.append(f"autocrop: failed to write autocrop_points.csv: {e}")
+
+    # Keep only valid detections
+    valid = [(cx, cy, sc) for (_, _, _, cx, cy, sc) in samples if np.isfinite(cx) and np.isfinite(cy) and np.isfinite(sc) and sc > 0.0]
+    if not valid:
+        warnings.append("autocrop: no valid detections (mask/line not found). Falling back to configured crop_center.")
+        return
+
+    scores = np.array([v[2] for v in valid], dtype=np.float32)
+    thr = float(np.percentile(scores, float(np.clip(cfg.autocrop_keep_percentile, 0.0, 100.0))))
+    kept = [(cx, cy, sc) for (cx, cy, sc) in valid if sc >= thr]
+
+    if len(kept) < int(cfg.autocrop_min_kept):
+        warnings.append(f"autocrop: only kept {len(kept)}/{len(valid)} samples (threshold={thr:.3g}). Falling back to configured crop_center.")
+        return
+
+    cxs = np.array([k[0] for k in kept], dtype=np.float32)
+    cys = np.array([k[1] for k in kept], dtype=np.float32)
+
+    cx_med_px = float(np.median(cxs))
+    cy_med_px = float(np.median(cys))
+
+    # Robust scatter check (MAD) in pixel space
+    mad_x = float(np.median(np.abs(cxs - cx_med_px)))
+    mad_y = float(np.median(np.abs(cys - cy_med_px)))
+
+    # If scatter is huge, it usually means we are locking onto the wrong feature.
+    # Use a conservative threshold relative to final crop size.
+    final_w, final_h = float(cfg.crop.wh[0]), float(cfg.crop.wh[1])
+    if (final_w <= 0.0 or final_h <= 0.0) and best_debug is not None:
+        fh_px, fw_px = best_debug[0].shape[:2]
+        final_w = float(fw_px)
+        final_h = float(fh_px)
+    scatter_limit = max(3.0, 0.25 * min(final_w, final_h))
+    if mad_x > scatter_limit or mad_y > scatter_limit:
+        warnings.append(f"autocrop: unstable detections (MAD {mad_x:.2f}px,{mad_y:.2f}px > {scatter_limit:.2f}px). Falling back to configured crop_center.")
+        return
+
+    # Convert the chosen pixel center back into cfg.crop.center_xy space if ref_wh is set.
+    center_space = "px"
+    cx_out = cx_med_px
+    cy_out = cy_med_px
+    if cfg.crop.ref_wh is not None and cfg.crop.ref_wh[0] > 0 and cfg.crop.ref_wh[1] > 0 and best_debug is not None:
+        ref_w, ref_h = cfg.crop.ref_wh
+        # Use actual frame size from best_debug frame (after mirroring)
+        fh, fw = best_debug[0].shape[:2]
+        sx = fw / float(ref_w)
+        sy = fh / float(ref_h)
+        if sx > 0 and sy > 0:
+            cx_out = float(cx_med_px / sx)
+            cy_out = float(cy_med_px / sy)
+            center_space = "ref"
+
+    # Apply to config for the rest of this analysis run
+    cfg.crop.center_xy = (float(cx_out), float(cy_out))
+
+    # Validate that the chosen center actually yields a detectable joint in the final crop (on the best sample frame).
+    if best_debug is not None:
+        try:
+            fr_full = best_debug[0]
+            final_cfg_px = CropConfig(center_xy=(cx_med_px, cy_med_px), wh=cfg.crop.wh, ref_wh=None)
+            final_crop_px, _ = crop_frame(fr_full, final_cfg_px)
+            j2, s2, _m2 = detect_laser_joint(final_crop_px, cfg.laser)
+            if j2 is None or not np.isfinite(s2) or float(s2) <= 0.0:
+                cfg.crop.center_xy = old_center_xy
+                warnings.append("autocrop: validation failed on final crop; falling back to configured crop_center.")
+                return
+        except Exception:
+            # If validation itself fails, do not block analysis.
+            pass
+
+    # Persist autocrop.json
+    try:
+        payload = {
+            "center_xy": [float(cx_out), float(cy_out)],
+            "center_space": center_space,
+            "ref_wh": list(cfg.crop.ref_wh) if cfg.crop.ref_wh is not None else None,
+            "search_wh": list(search_wh_used) if search_wh_used is not None else None,
+            "final_wh": [int(final_w), int(final_h)],
+            "samples_total": int(total_samples),
+            "samples_valid": int(len(valid)),
+            "samples_kept": int(len(kept)),
+            "score_keep_percentile": float(cfg.autocrop_keep_percentile),
+            "score_threshold": float(thr),
+            "mad_px": [float(mad_x), float(mad_y)],
+        }
+        apath.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception as e:
+        warnings.append(f"autocrop: failed to write autocrop.json: {e}")
+
+    # Emit visual debug artifacts from best sample
+    if best_debug is not None:
+        fr_full, search_crop, mask_u8, joint_local, search_off, best_score, _, _, _ = best_debug
+        try:
+            # Final crop preview from the full frame using the chosen center (in pixel space)
+            # Convert cfg-space center back to full pixels (for preview only).
+            cxp, cyp = cx_med_px, cy_med_px
+            final_cfg = CropConfig(center_xy=(cxp, cyp), wh=cfg.crop.wh, ref_wh=None)
+            final_crop, _ = crop_frame(fr_full, final_cfg)
+
+            # Search preview overlay (draw best joint + median center + final crop box)
+            prev = search_crop.copy()
+            # mark best joint (red)
+            cv2.circle(prev, (int(round(joint_local[0])), int(round(joint_local[1]))), 4, (0, 0, 255), -1)
+
+            # median center in local coords
+            med_local_x = cx_med_px - float(search_off[0])
+            med_local_y = cy_med_px - float(search_off[1])
+            cv2.circle(prev, (int(round(med_local_x)), int(round(med_local_y))), 4, (0, 255, 0), -1)
+
+            fw, fh = int(cfg.crop.wh[0]), int(cfg.crop.wh[1])
+            if fw <= 0 or fh <= 0:
+                fh_full, fw_full = fr_full.shape[:2]
+                fw, fh = int(fw_full), int(fh_full)
+            x0 = int(round(med_local_x - fw / 2.0))
+            y0 = int(round(med_local_y - fh / 2.0))
+            cv2.rectangle(prev, (x0, y0), (x0 + fw, y0 + fh), (0, 255, 0), 2)
+
+            cv2.imwrite(str(preview_path), prev)
+            cv2.imwrite(str(final_path), final_crop)
+
+            mask_bgr = cv2.cvtColor(mask_u8, cv2.COLOR_GRAY2BGR)
+            cv2.imwrite(str(mask_path), mask_bgr)
+        except Exception as e:
+            warnings.append(f"autocrop: failed to write preview images: {e}")
+
+    warnings.append("autocrop: wrote autocrop.json + autocrop_preview.jpg + autocrop_final.jpg + autocrop_points.csv")
+
 def analyze_video(path: Path, idx: int, pa: float, cfg: AnalysisConfig, *, mirror_x: bool = False) -> LineAnalysis:
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
@@ -267,6 +530,9 @@ def analyze_session_json(json_path: Path, cfg: AnalysisConfig) -> AnalysisSummar
 
     results: List[LineAnalysis] = []
     warnings: List[str] = []
+
+    _maybe_autocrop_session(session_dir, clips, cfg, outdir, warnings)
+
 
     for clip in clips:
         if clip.get("ok") is False:
