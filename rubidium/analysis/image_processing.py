@@ -34,6 +34,12 @@ class LaserExtractConfig:
     clahe_clip: float = 3.0
     clahe_grid: Tuple[int, int] = (8, 8)
 
+    # Joint (laser-line intersection) detector knobs (used for auto-crop prepass)
+    joint_samples: int = 120
+    joint_perp_half_len_px: int = 16
+    joint_perp_half_wid_px: int = 2
+    joint_min_mask_px: int = 50
+
 
 # ----------------------------
 # pipeline core
@@ -78,25 +84,149 @@ def run_pipeline(frame_bgr: np.ndarray, steps: List[Step], *,
 def crop_frame(frame: np.ndarray, cfg: CropConfig) -> Tuple[np.ndarray, Tuple[int, int]]:
     h, w = frame.shape[:2]
 
+    # Resolve center in current-frame pixels (optionally scaled from a reference resolution).
     if cfg.ref_wh is not None and cfg.ref_wh[0] > 0 and cfg.ref_wh[1] > 0:
         ref_w, ref_h = cfg.ref_wh
         sx = w / float(ref_w)
         sy = h / float(ref_h)
-        cx = int(round(cfg.center_xy[0] * sx))
-        cy = int(round(cfg.center_xy[1] * sy))
+        cx = float(cfg.center_xy[0]) * sx
+        cy = float(cfg.center_xy[1]) * sy
     else:
-        cx = int(round(cfg.center_xy[0]))
-        cy = int(round(cfg.center_xy[1]))
+        cx = float(cfg.center_xy[0])
+        cy = float(cfg.center_xy[1])
 
-    half_w = int(round(cfg.wh[0] / 2.0))
-    half_h = int(round(cfg.wh[1] / 2.0))
+    crop_w = int(max(1, round(cfg.wh[0])))
+    crop_h = int(max(1, round(cfg.wh[1])))
+    crop_w = min(crop_w, w)
+    crop_h = min(crop_h, h)
 
-    x0 = max(0, cx - half_w)
-    x1 = min(w, cx + half_w)
-    y0 = max(0, cy - half_h)
-    y1 = min(h, cy + half_h)
+    x0 = int(round(cx - crop_w / 2.0))
+    y0 = int(round(cy - crop_h / 2.0))
+
+    # Clamp so the crop keeps its requested size whenever possible.
+    x0 = max(0, min(x0, w - crop_w))
+    y0 = max(0, min(y0, h - crop_h))
+    x1 = x0 + crop_w
+    y1 = y0 + crop_h
 
     return frame[y0:y1, x0:x1], (x0, y0)
+
+
+def build_laser_mask(frame_bgr: np.ndarray, cfg: Optional[LaserExtractConfig]) -> Tuple[np.ndarray, np.ndarray]:
+    """Return (src_u8, mask_u8) for the laser stripe."""
+    lc = cfg or LaserExtractConfig()
+
+    src_u8 = _extract_v_u8(frame_bgr)
+    if lc.use_clahe:
+        src_u8 = _apply_clahe_u8(src_u8, lc.clahe_clip, lc.clahe_grid)
+    k = int(lc.blur_ksize)
+    if k >= 3 and (k % 2) == 1:
+        src_u8 = cv2.GaussianBlur(src_u8, (k, k), 0)
+
+    if lc.bright_percentile < 0:
+        if int(np.max(src_u8)) < 30:
+            mask_u8 = np.zeros_like(src_u8)
+        else:
+            _, mask_u8 = cv2.threshold(src_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    else:
+        v = src_u8.astype(np.float32)
+        p = float(np.clip(lc.bright_percentile, 0.0, 100.0))
+        thr = float(np.percentile(v, p))
+        mask_u8 = (v >= thr).astype(np.uint8) * 255
+
+    if lc.hsv_lower is not None and lc.hsv_upper is not None:
+        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        gate = cv2.inRange(
+            hsv,
+            np.array(lc.hsv_lower, dtype=np.uint8),
+            np.array(lc.hsv_upper, dtype=np.uint8),
+        )
+        mask_u8 = cv2.bitwise_and(mask_u8, gate)
+
+    mk = int(lc.morph_ksize)
+    if mk > 1:
+        kernel = np.ones((mk, mk), dtype=np.uint8)
+        mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kernel)
+        mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_CLOSE, kernel)
+
+    return src_u8, mask_u8
+
+
+def detect_laser_joint(frame_bgr: np.ndarray, cfg: Optional[LaserExtractConfig]) -> Tuple[Optional[Tuple[float, float]], float, np.ndarray]:
+    """Detect a stable "joint" point along a line laser.
+
+    Returns:
+      - center_xy (float px, local to frame_bgr) or None
+      - score (higher is better)
+      - mask_u8 (for debugging)
+    """
+    lc = cfg or LaserExtractConfig()
+    h, w = frame_bgr.shape[:2]
+
+    src_u8, mask_u8 = build_laser_mask(frame_bgr, lc)
+    ys, xs = np.nonzero(mask_u8)
+    if xs.size < int(lc.joint_min_mask_px):
+        return None, 0.0, mask_u8
+
+    pts = np.column_stack([xs.astype(np.float32), ys.astype(np.float32)])
+
+    # Fit laser line
+    vx, vy, x0, y0 = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01)
+    vx, vy, x0, y0 = float(vx), float(vy), float(x0), float(y0)
+    nrm = float((vx * vx + vy * vy) ** 0.5) or 1.0
+    vx, vy = vx / nrm, vy / nrm
+    px, py = -vy, vx  # perpendicular
+
+    # Candidate range along the fitted line (robust to outliers)
+    t = (pts[:, 0] - x0) * vx + (pts[:, 1] - y0) * vy
+    tmin = float(np.percentile(t, 5.0))
+    tmax = float(np.percentile(t, 95.0))
+    if not np.isfinite(tmin) or not np.isfinite(tmax) or tmax <= tmin:
+        return None, 0.0, mask_u8
+
+    # Gradient magnitude on the source image
+    src_f = src_u8.astype(np.float32)
+    gx = cv2.Sobel(src_f, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(src_f, cv2.CV_32F, 0, 1, ksize=3)
+
+    half_len = int(max(1, lc.joint_perp_half_len_px))
+    half_wid = int(max(0, lc.joint_perp_half_wid_px))
+    n_samples = int(max(5, lc.joint_samples))
+
+    def _edge_energy(cx: float, cy: float) -> float:
+        acc = 0.0
+        cnt = 0
+        for s in range(-half_len, half_len + 1):
+            for u in range(-half_wid, half_wid + 1):
+                x = cx + s * px + u * vx
+                y = cy + s * py + u * vy
+                ix = int(round(x))
+                iy = int(round(y))
+                if 0 <= ix < w and 0 <= iy < h:
+                    gxx = float(gx[iy, ix])
+                    gyy = float(gy[iy, ix])
+                    acc += float((gxx * gxx + gyy * gyy) ** 0.5)
+                    cnt += 1
+        return acc / float(max(1, cnt))
+
+    best_score = -1.0
+    best_xy: Optional[Tuple[float, float]] = None
+
+    for i in range(n_samples):
+        ti = tmin + (tmax - tmin) * (i / float(max(1, n_samples - 1)))
+        cx = x0 + ti * vx
+        cy = y0 + ti * vy
+        if cx < 0.0 or cx > (w - 1) or cy < 0.0 or cy > (h - 1):
+            continue
+        sc = _edge_energy(cx, cy)
+        if sc > best_score:
+            best_score = sc
+            best_xy = (cx, cy)
+
+    if best_xy is None or not np.isfinite(best_score):
+        return None, 0.0, mask_u8
+
+    return best_xy, float(best_score), mask_u8
 
 
 def _extract_v_u8(frame_bgr: np.ndarray) -> np.ndarray:

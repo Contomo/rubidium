@@ -23,7 +23,13 @@ class RubidiumAnalyse:
         self.write_npz = self.cv.get_bool("analysis_write_npz", False)
 
         self.crop_center = self.cv.get_str_opt("crop_center")
+        self.crop_search_size = self.cv.get_str_opt("crop_search_size")
         self.crop_size = self.cv.get_str_opt("crop_size")
+        self.crop_auto_center = self.cv.get_bool("crop_auto_center", False)
+        self.crop_auto_center_samples_per_clip = self.cv.get_int("crop_auto_center_samples_per_clip", 1, minval=1)
+        self.crop_auto_center_keep_percentile = self.cv.get_float("crop_auto_center_keep_percentile", 50.0, minval=0.0, maxval=100.0)
+        self.crop_auto_center_max_samples = self.cv.get_int("crop_auto_center_max_samples", 0, minval=0)
+        self.crop_auto_center_min_kept = self.cv.get_int("crop_auto_center_min_kept", 8, minval=1)
         self.base_resolution = self.cv.get_str_opt("base_resolution")
 
         self.laser_hsv_lower = self.cv.get_str_opt("laser_hsv_lower")
@@ -103,6 +109,7 @@ class RubidiumAnalyse:
 
         crop = CropConfig()
         cc = self._parse_nums(self.crop_center, 2, float)
+        css = self._parse_nums(self.crop_search_size, 2, int)
         cs = self._parse_nums(self.crop_size, 2, int)
         br = self._parse_nums(self.base_resolution, 2, int)
         
@@ -123,6 +130,10 @@ class RubidiumAnalyse:
             min_row_energy=float(self.laser_min_row_energy),
             median_ksize=int(self.laser_median_ksize),
             morph_ksize=int(self.laser_morph_ksize),
+            use_clahe=bool(self.laser_use_clahe),
+            blur_ksize=int(self.laser_blur_ksize),
+            clahe_clip=float(self.laser_clahe_clip),
+            clahe_grid=tuple(int(v) for v in self.laser_clahe_grid),
         )
 
         tri = TriangulationConfig(
@@ -141,6 +152,12 @@ class RubidiumAnalyse:
              write_plots=bool(self.write_plots), write_npz=bool(self.write_npz),
             output_dir=str(output_dir),
             pipeline_steps=pipeline_steps,
+            autocrop_enable=bool(self.crop_auto_center),
+            autocrop_search_wh=(int(css[0]), int(css[1])) if css else None,
+            autocrop_samples_per_clip=int(self.crop_auto_center_samples_per_clip),
+            autocrop_max_samples=int(self.crop_auto_center_max_samples),
+            autocrop_keep_percentile=float(self.crop_auto_center_keep_percentile),
+            autocrop_min_kept=int(self.crop_auto_center_min_kept),
          )
 
         self.gcode.respond_info(f"rubidium: analyzing session {scan_dir.name}...")
@@ -150,12 +167,45 @@ class RubidiumAnalyse:
         except Exception as e:
             self.gcode.respond_info(f"rubidium analyse failed: {e}")
             return
+        
+        for warn in getattr(summary, "warnings", []):
+            self.gcode.respond_info(warn)
+
+        if self.crop_auto_center:
+            try:
+                ap = Path(str(output_dir)) / "autocrop.json"
+                if ap.exists():
+                    import json as _json
+                    d = _json.loads(ap.read_text(encoding="utf-8"))
+                    cx, cy = d.get("center_xy") or (None, None)
+                    space = str(d.get("center_space") or "")
+                    if cx is not None and cy is not None:
+                        self.gcode.respond_info(f"rubidium autocrop: center={float(cx):.2f},{float(cy):.2f} ({space})")
+            except Exception:
+                pass
 
         if not summary.results:
             self.gcode.respond_info("rubidium analyse: no valid clips found to analyze.")
             return
 
         if summary.best:
-            self.gcode.respond_info(f"rubidium analyse: best-value={summary.best.pa:.6f} (score={summary.best.breakdown.score:.3f})")
+            pa1 = float(summary.best.pa)
+            pa2 = summary.best.pa2
+            score = float(summary.best.breakdown.score)
+            if pa2 is not None:
+                rr = summary.best.grid_row
+                cc = summary.best.grid_col
+                if rr is not None and cc is not None:
+                    self.gcode.respond_info(
+                        f"rubidium analyse: best-value={pa1:.6f},{float(pa2):.6f} (score={score:.3f}) [r{int(rr)},c{int(cc)}]"
+                    )
+                else:
+                    self.gcode.respond_info(
+                        f"rubidium analyse: best-value={pa1:.6f},{float(pa2):.6f} (score={score:.3f})"
+                    )
+            else:
+                self.gcode.respond_info(
+                    f"rubidium analyse: best-value={pa1:.6f} (score={score:.3f})"
+                )
         else:
             self.gcode.respond_info("rubidium analyse complete, no clear winner.")

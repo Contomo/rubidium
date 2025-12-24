@@ -99,7 +99,7 @@ class RubidiumScan(RubidiumBase):
                 mode="scan",
                 s=s,
                 line=pl,
-                previous_line=prev_line,
+                last_line=prev_line,
                 next_line=next_line,
                 scan={
                     "buf_start": Pt(bsx, bsy, sz),

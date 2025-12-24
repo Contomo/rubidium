@@ -34,6 +34,8 @@ from .image_processing import (
     LaserExtractConfig,
     build_laser_pipeline,
     run_pipeline,
+    detect_laser_joint,
+    crop_frame,
 )
 from .scoring import ScoreBreakdown, score_heightmap
 from .visualization import render_heightmap_plot, create_debug_thumbnails, save_dashboard
@@ -64,10 +66,14 @@ class AnalysisConfig:
     write_plots: bool = False
     write_npz: bool = True
     output_dir: Optional[str] = None
-
-    # NEW: optional pipeline ordering by step names
     pipeline_steps: Optional[List[str]] = None
 
+    autocrop_enable: bool = False
+    autocrop_search_wh: Optional[Tuple[int, int]] = None
+    autocrop_samples_per_clip: int = 1
+    autocrop_max_samples: int = 0  # 0 -> no explicit cap
+    autocrop_keep_percentile: float = 50.0  # keep samples with score >= this percentile
+    autocrop_min_kept: int = 8
 
 @dataclass(slots=True)
 class LineAnalysis:
@@ -99,6 +105,7 @@ class AnalysisSummary:
     best: Optional[LineAnalysis]
     summary_csv: Optional[Path]
     summary_sheet: Optional[Path]
+    warnings: List[str] = field(default_factory=list)
 
 
 def _load_camera_calibration(path: Path) -> CameraCalibration:
@@ -259,6 +266,7 @@ def analyze_session_json(json_path: Path, cfg: AnalysisConfig) -> AnalysisSummar
     cfg.output_dir = str(outdir)
 
     results: List[LineAnalysis] = []
+    warnings: List[str] = []
 
     for clip in clips:
         if clip.get("ok") is False:
@@ -323,7 +331,9 @@ def analyze_session_json(json_path: Path, cfg: AnalysisConfig) -> AnalysisSummar
     try:
         save_dashboard(results, sheet_path)
     except Exception as e:
-        logging.error(f"Failed to save dashboard: {e}")
+        msg = f"Failed to save dashboard: {e}"
+        logging.error(msg)
+        warnings.append(msg)
         sheet_path = None
         
-    return AnalysisSummary(session_dir, results, best, csv_path, sheet_path)
+    return AnalysisSummary(session_dir, results, best, csv_path, sheet_path, warnings=warnings)

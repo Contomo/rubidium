@@ -260,13 +260,13 @@ class RubidiumPrint(RubidiumBase):
 
         for idx, pl in enumerate(lines):
             self.progress = idx / max(1, n)
-            prev_line = lines[idx - 1] if idx > 0 else None
+            last_line = lines[idx - 1] if idx > 0 else None
             next_line = lines[idx + 1] if idx + 1 < n else None
             ctx = self._tmpl_ctx(
                 mode="print",
                 s=settings,
                 line=pl,
-                previous_line=prev_line,
+                last_line=last_line,
                 next_line=next_line,
             )
 
@@ -281,11 +281,8 @@ class RubidiumPrint(RubidiumBase):
 
             yield (tuning_fmt % (pl.parameter_value,))
 
-
             if getattr(pl, "parameter_value2", None) is not None and tuning_fmt2:
                 yield (tuning_fmt2 % (pl.parameter_value2,))
-            elif tuning_fmt2:
-                self.gcode.respond_info("rubidium print: possibly a fucky wucky but im not sure if we should raise here tho")
             
             yield "G90"
 

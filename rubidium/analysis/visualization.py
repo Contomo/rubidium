@@ -329,6 +329,12 @@ def _save_dashboard_grid(results: List, out_path: Path) -> None:
     needed_h = HEADER_H + ROW_H * (len(sorted_res) + 1) + BORDER
     table_h = max(grid_h, needed_h)
 
+    if grid_img.shape[0] < table_h:
+        pad_h = table_h - grid_img.shape[0]
+        pad = np.zeros((pad_h, grid_img.shape[1], 3), dtype=np.uint8)
+        pad[:] = BG_COLOR
+        grid_img = np.vstack([grid_img, pad])
+
     table = np.zeros((table_h, W_TABLE, 3), dtype=np.uint8)
     table[:] = BG_COLOR
 

@@ -379,13 +379,10 @@ class GridPatternBase(PatternType):
         width = (cols - 1) * dx + line_length
         height = (rows - 1) * dy
 
-        mx = dx
-        my = dy
-
-        x0 = origin_x - mx
-        x1 = origin_x + width + mx
-        y0 = origin_y - my
-        y1 = origin_y + height + my
+        x0 = origin_x
+        x1 = origin_x + width
+        y0 = origin_y - dy
+        y1 = origin_y + height + dy
 
         def mk_line(i: int, x_a: float, y_a: float, x_b: float, y_b: float) -> Line:
             a = Pt(x_a, y_a, origin_z)
