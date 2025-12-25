@@ -11,7 +11,7 @@ from typing import Any, Optional, Tuple, Dict
 
 
 from ..core.configview import ConfigView
-from .video_engine import VideoEngine, CmdStartRecording, CmdStopRecording, CmdLogMark, CmdQueueCut
+from .video_engine import VideoEngine, CmdStartRecording, CmdStopRecording, CmdLogMark, CmdQueueCut, StopCompletion
 
 
 def _is_url(text: str) -> bool:
@@ -154,6 +154,9 @@ class VideoInput:
         )
         self.engine.start()
 
+        self._pending_completion: Optional[StopCompletion] = None
+        self._last_finalize: Optional[Dict[str, Any]] = None
+
         self._session_start_pt: Optional[float] = None
         self._active_marks: Dict[str, Tuple[float, Dict[str, Any]]] = {} 
         self._old_latency_s: Optional[float] = None
@@ -212,7 +215,7 @@ class VideoInput:
         if self._old_latency_s is None: return
         self.latency_s = self._old_latency_s
 
-    def start_session(self, outdir: Path) -> None:
+    def start_session(self, outdir: Path, *, meta: Optional[Dict[str, Any]] = None) -> None:
         """Prepare session paths and schedule recording start"""
         
         ts = time.strftime("%Y-%m-%d_%H-%M", time.localtime())
@@ -229,6 +232,8 @@ class VideoInput:
         log_path = session_dir / f"{self.video_session_filename}.record.log"
         json_path = session_dir / f"{self.video_session_filename}.json"
 
+        meta_s = _json_sanitize(meta or {})
+
         cmd_args = self._build_base_ffmpeg_cmd()
         cmd_args.append(str(video_path))
 
@@ -243,20 +248,41 @@ class VideoInput:
                 output_path=video_path,
                 cmd_args=cmd_args,
                 log_path=log_path,
-                json_path=json_path
+                json_path=json_path,
+                session_meta=meta_s
             ))
 
         self._planner_cb.schedule_cb(_start_cb, payload=None)
 
-    def stop_session(self, *, finalize: bool) -> None:
+    def stop_session(self, *, finalize: bool, notify_done: bool = False) -> None:
+        completion = StopCompletion() if notify_done else None
+        if completion is not None:
+            self._pending_completion = completion
         def _end_cb(eventtime: float, print_time: float, _: Any) -> None:
             self.gcode.respond_info("rubidium_video: stopping recording")
-            self.engine.submit(CmdStopRecording(finalize=finalize))
+            self.engine.submit(CmdStopRecording(finalize=finalize, completion=completion))
             self._session_start_pt = None
             self._active_marks.clear()
             self.reset_latency_offset()
 
         self._planner_cb.schedule_cb(_end_cb, payload=None)
+
+        if completion is not None:
+            def _poll_done(eventtime: float):
+                c = self._pending_completion
+                if c is None:
+                    return self.reactor.NEVER
+                if not c.event.is_set():
+                    return eventtime + 0.20
+                self._pending_completion = None
+                self._last_finalize = dict(c.result)
+                msg = "rubidium_video: post-processing complete"
+                if self._last_finalize.get("ok") is False:
+                    msg += f" (failed: {self._last_finalize.get('error')})"
+                self.gcode.respond_info(msg)
+                return self.reactor.NEVER
+
+            self.reactor.register_timer(_poll_done, self.reactor.monotonic() + 0.20)
 
     def mark(self, *, kind: str, idx: int, meta: Optional[dict[str, Any]] = None, key: Optional[str] = None) -> None:
         kind_l = (kind or "").strip().lower()

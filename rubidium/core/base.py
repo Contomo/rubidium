@@ -10,6 +10,27 @@ from typing import Any, Dict, Optional, Tuple, Literal, List
 from .lines import Lines, Line, LineSegment, Pt
 
 
+class _VSDProviderAdapter:
+    """Adapter object passed to virtual_sdcard.
+    Keeps the virtual_sdcard-facing API separate from the Rubidium object's get_status().
+    """
+    __slots__ = ("_o",)
+    def __init__(self, owner: "RubidiumBase") -> None:
+        self._o = owner
+    def get_gcode(self):
+        return self._o.get_gcode()
+    def get_stats(self, eventtime):
+        return self._o.get_stats(eventtime)
+    def get_status(self, eventtime):
+        return self._o._vsd_get_status(eventtime)
+    def get_name(self) -> str:
+        return self._o.get_name()
+    def reset(self) -> None:
+        self._o.reset()
+    def handle_shutdown(self) -> None:
+        self._o.handle_shutdown()
+
+
 class TemplateSet:
     """Container for templated G-Code snippets."""
     __slots__ = ("start", "end", "before_line", "after_line")
@@ -62,8 +83,11 @@ class RubidiumBase:
         self._run_settings: Optional[Dict[str, Any]] = None
         self._run_gcmd = None
         self._run_pattern = None
+        self._run_pattern_name: Optional[str] = None
         self._keepout_xy: Optional[List[Tuple[float, float]]] = None
         self.progress: float = 0.0
+        self._state: str = "idle"
+        self._vsd_provider = _VSDProviderAdapter(self)
 
     # -- lifecycle ------------------------------------------------------
     def _on_connect(self) -> None:
@@ -116,6 +140,7 @@ class RubidiumBase:
         keepout_xy = pattern.get_keepout_outline_xy()
 
         self._run_pattern = pattern
+        self._run_pattern_name = pattern_name
         settings = self._build_settings_from(gcmd, pattern)
         lines = self._prepare_lines_for_run(
             lines,
@@ -129,8 +154,9 @@ class RubidiumBase:
         self._keepout_xy = keepout_xy 
         self._run_gcmd = gcmd # wtf
         self.progress = 0.0
+        self._state = "running"
         gcmd.respond_info(f"{self.provider_name} running with pattern '{pattern_name}'")
-        self.sdcard.print_with_gcode_provider(self)  # type: ignore # perhaps not deligate this to self but a subclass instantiated with all those settings instead
+        self.sdcard.print_with_gcode_provider(self._vsd_provider)  # type: ignore # perhaps not deligate this to self but a subclass instantiated with all those settings instead
 
     def _select_pattern_name(self, gcmd) -> str:
         pattern_name = gcmd.get("PATTERN", None)
@@ -180,11 +206,10 @@ class RubidiumBase:
         ctx: Dict[str, Any] = {
             "mode": mode,
             "travel_speed": pick("travel_speed", self.v_travel),
-            "scan_speed":   pick("scan_speed", self.v_travel),
-            "scan_buffer":  pick("scan_buffer", 0.0),
             "line": line,
             "last_line": last_line,
             "next_line": next_line,
+            "layer_height": s.get("layer_height", 0.0),
             "pattern": s.get("pattern"),
             "pattern_settings": s.get("pattern_settings", {}),
             "pattern_segments": s.get("pattern_segments", []),
@@ -271,35 +296,42 @@ class RubidiumBase:
         """Return an iterator over GCode lines for the current run."""
         if self._run_lines is None or self._run_settings is None:
             return iter([])
-        return self._iter_run()
+
+        def _gen():
+            try:
+                yield from self._iter_run()
+            finally:
+                self._state = "done"
+        return _gen()
 
     def get_stats(self, eventtime):
         return True, self.provider_name # this is the virtual sd card crap, why is this in the base class.... this should be offloaded into a true generator only class
 
-    def get_status(self, eventtime): 
-        st = {
+    def _vsd_get_status(self, eventtime):
+        return {
             "file_path": self.get_name(),
             "progress": self.progress,
             "file_position": 0,
             "file_size": 0,
         }
+
+    def get_status(self, eventtime=None):
+        st: Dict[str, Any] = {
+            "state": self._state,
+            "progress": float(self.progress),
+            "pattern": self._run_pattern_name,
+        }
         if self._run_settings is not None:
-            st["rubidium"] = {
-                "provider": self.provider_name,
-                "settings": dict(self._run_settings),
-            }
-        if self._run_pattern is not None:
-            try:
-                st.setdefault("rubidium", {})["pattern"] = self._run_pattern.get_status(eventtime)
-            except Exception:
-                pass
+            st["settings"] = dict(self._run_settings)
         return st
 
     def get_name(self) -> str:
         return self.provider_name
 
     def reset(self) -> None:
-        self.progress = 0.0 
+        self.progress = 0.0
+        self._state = "idle"
+        self._run_pattern_name = None
 
     def handle_shutdown(self) -> None:
         pass

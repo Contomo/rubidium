@@ -58,9 +58,6 @@ class RubidiumPrint(RubidiumBase):
         self.line_width_pct: float = self._get(
             "line_width_pct", 120,  method="getfloat", above=0.0
         ) # type: ignore
-        self.layer_height: float = self._get(
-            "layer_height", 0.20,  method="getfloat", above=0.0
-        ) # type: ignore
         raw_speeds = self._get("speeds", "", method="get")
         try:
             self.speeds_default = parse_speeds(raw_speeds) # type: ignore
@@ -88,7 +85,6 @@ class RubidiumPrint(RubidiumBase):
         s["flow"]           = gcmd.get_float("FLOW",           self.flow_default,   above=0.0)
         s["line_width"]     = gcmd.get_float("LINE_WIDTH",     self.line_width,     minval=0.0)
         s["line_width_pct"] = gcmd.get_float("LINE_WIDTH_PCT", self.line_width_pct, above=0.0)
-        s["layer_height"]   = gcmd.get_float("LAYER_HEIGHT",   self.layer_height,   above=0.0)
 
         speeds_map: Dict[str, float] = dict(self.speeds_default)
         for label, base in list(speeds_map.items()):
@@ -147,15 +143,11 @@ class RubidiumPrint(RubidiumBase):
         brim_lines: List[Line] = []
         for i in range(walls): # type: ignore
             off = sep + (line_w * i)
-            x0 = minx - off
-            x1 = maxx + off
-            y0 = miny - off
-            y1 = maxy + off
+            x0, x1 = minx - off, maxx + off
+            y0, y1 = miny - off, maxy + off
 
-            p0 = Pt(x0, y0, z)
-            p1 = Pt(x1, y0, z)
-            p2 = Pt(x1, y1, z)
-            p3 = Pt(x0, y1, z)
+            p0, p1 = Pt(x0, y0, z), Pt(x1, y0, z)
+            p2, p3 = Pt(x1, y1, z), Pt(x0, y1, z)
 
             segs = (
                 LineSegment(start=p0, end=p1, speed_label=speed_label), # type: ignore
@@ -195,7 +187,7 @@ class RubidiumPrint(RubidiumBase):
             minx, maxx = min(minx, min(kxs)), max(maxx, max(kxs))
             miny, maxy = min(miny, min(kys)), max(maxy, max(kys))
 
-        m = float(EXCLUDE_OBJECT_MARGIN)
+        m = EXCLUDE_OBJECT_MARGIN
         minx -= m; maxx += m
         miny -= m; maxy += m
 
@@ -277,11 +269,11 @@ class RubidiumPrint(RubidiumBase):
             ):
                 yield ln
 
-            yield f"G0 X{pl.start.x + offx:.3f} Y{pl.start.y + offy:.3f} Z{pl.start.z + offz + layer_h:.3f} F{fast_feed:.1f}"
+            yield f"G0 X{pl.start.x + offx:.3f} Y{pl.start.y + offy:.3f} Z{pl.start.z + offz:.3f} F{fast_feed:.1f}"
 
             yield (tuning_fmt % (pl.parameter_value,))
 
-            if getattr(pl, "parameter_value2", None) is not None and tuning_fmt2:
+            if pl.parameter_value2 is not None and tuning_fmt2:
                 yield (tuning_fmt2 % (pl.parameter_value2,))
             
             yield "G90"

@@ -64,7 +64,7 @@ class RubidiumScan(RubidiumBase):
         if getattr(s, 'video_latency_ms', None) is not None:
             self.video.set_latency_offset(s["video_latency_ms"])
 
-        self.video.start_session(self._outdir)
+        self.video.start_session(self._outdir, meta={"mode": "scan", "pattern": getattr(self, "_run_pattern_name", None)})
 
         travel_speed = float(s.get("travel_speed", self.v_travel))
         scan_speed  = float(s.get("scan_speed", 10.0))
@@ -93,14 +93,12 @@ class RubidiumScan(RubidiumBase):
             bex = ex + ux * buf
             bey = ey + uy * buf
 
-            prev_line = lines[i - 1] if i > 0 else None
-            next_line = lines[i + 1] if i + 1 < n else None
             scan_ctx = self._tmpl_ctx(
                 mode="scan",
                 s=s,
                 line=pl,
-                last_line=prev_line,
-                next_line=next_line,
+                last_line=lines[i - 1] if i > 0     else None,
+                next_line=lines[i + 1] if i + 1 < n else None,
                 scan={
                     "buf_start": Pt(bsx, bsy, sz),
                     "buf_end":   Pt(bex, bey, sz),
@@ -117,19 +115,21 @@ class RubidiumScan(RubidiumBase):
                 yield ln
 
             yield f"G0 X{bsx:.3f} Y{bsy:.3f} Z{sz:.3f} F{travel_f:.1f}"
-
             yield f"G1 X{sx:.3f} Y{sy:.3f} F{scan_f:.1f}"
-            line_idx = int(getattr(pl, 'idx', i))
-            line_key = f"line_{line_idx:03d}"
+
+            base_meta = {
+                "parameter_value": pl.parameter_value,
+                "parameter_value2": pl.parameter_value2,
+                "grid_row": pl.grid_row,
+                "grid_col": pl.grid_col,
+            }
+
             self.video.mark(
                 kind="start",
-                idx=line_idx,
-                key=line_key,
+                idx=pl.idx,
+                key=f"line_{pl.idx:03d}",
                 meta={
-                    "parameter_value": float(pl.parameter_value),
-                    "parameter_value2": (float(pl.parameter_value2) if getattr(pl, "parameter_value2", None) is not None else None),
-                    "grid_row": getattr(pl, "grid_row", None),
-                    "grid_col": getattr(pl, "grid_col", None),
+                    **base_meta,
                     "raw_start": [sx, sy, sz],
                     "raw_end": [ex, ey, sz],
                     "buf_start": [bsx, bsy, sz],
@@ -138,16 +138,12 @@ class RubidiumScan(RubidiumBase):
             )
 
             yield f"G1 X{ex:.3f} Y{ey:.3f} F{scan_f:.1f}"
+
             self.video.mark(
                 kind="end",
-                idx=line_idx,
-                key=line_key,
-                meta={
-                    "parameter_value": float(pl.parameter_value),
-                    "parameter_value2": (float(pl.parameter_value2) if getattr(pl, "parameter_value2", None) is not None else None),
-                    "grid_row": getattr(pl, "grid_row", None),
-                    "grid_col": getattr(pl, "grid_col", None),
-                },
+                idx=pl.idx,
+                key=f"line_{pl.idx:03d}",
+                meta=base_meta,
             )
 
             yield f"G1 X{bex:.3f} Y{bey:.3f} F{scan_f:.1f}"
@@ -161,8 +157,7 @@ class RubidiumScan(RubidiumBase):
 
         self.progress = 1.0
 
-        # Stop recording and cut per-line clips
-        self.video.stop_session(finalize=True)
+        self.video.stop_session(finalize=True, notify_done=True)
 
         for ln in self._render_template_lines(
             self.templates.end, 

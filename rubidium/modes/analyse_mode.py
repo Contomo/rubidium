@@ -1,6 +1,8 @@
 # rubidium/modes/analyse_mode.py
 from __future__ import annotations
 
+import time, json
+
 from pathlib import Path
 from typing import Optional
 
@@ -65,6 +67,23 @@ class RubidiumAnalyse:
             desc=self.cmd_RUBIDIUM_ANALYSE_help
         )
 
+        self._status = {"state": "idle", "last": None}
+
+    def get_status(self, eventtime=None):
+        return dict(self._status)
+
+    @staticmethod
+    def _session_meta(json_path: Path) -> dict:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        sess = data.get("session") or {}
+        meta = sess.get("meta") or {}
+        return {
+            "pattern": meta.get("pattern"),
+            "session_id": sess.get("id"),
+            "start_time": sess.get("start_time"),
+            "clips": len(data.get("clips") or []),
+        }
+
     @staticmethod
     def _parse_nums(s: Optional[str], n: int, cast=float) -> Optional[tuple]:
         if not s: return None
@@ -74,22 +93,6 @@ class RubidiumAnalyse:
             return tuple(cast(parts[i]) for i in range(n))
         except Exception: return None
         
-    @staticmethod
-    def _format_best_value(best) -> str:
-        pa1 = float(getattr(best, "pa", 0.0))
-        score = float(getattr(getattr(best, "breakdown", None), "score", 0.0))
-        pa2 = getattr(best, "pa2", None)
-        rr = getattr(best, "grid_row", None)
-        cc = getattr(best, "grid_col", None)
-
-        if pa2 is None:
-            s = f"rubidium analyse: best-value={pa1:.6f} (score={score:.3f})"
-        else:
-            s = f"rubidium analyse: best-value={pa1:.6f},{float(pa2):.6f} (score={score:.3f})"
-        if rr is not None and cc is not None:
-            s += f" [r{int(rr)},c{int(cc)}]"
-        return s
-
     def _resolve_scan_dir(self, gcmd) -> Optional[Path]:
         self.paths.ensure_dirs()
         scan_root = self.paths.dirs.scan
@@ -109,19 +112,28 @@ class RubidiumAnalyse:
     def cmd_RUBIDIUM_ANALYSE(self, gcmd) -> None:
         scan_dir = self._resolve_scan_dir(gcmd)
         if scan_dir is None or not scan_dir.is_dir():
-            self.gcode.respond_info("rubidium: no scan directory found.")
-            return
+            raise gcmd.error("rubidium: no scan directory found.")
 
         json_path = scan_dir / "rubidium_scan_session.json"
         if not json_path.exists():
-            self.gcode.respond_info(f"rubidium: no session JSON found in {scan_dir.name}")
-            return
+            raise gcmd.error(f"rubidium: no session JSON found in {scan_dir.name}")
+
+        self._status = {"state": "running", "last": {"dir": str(scan_dir), "json": str(json_path)}}
+
+        try:
+            mtime = json_path.stat().st_mtime
+            meta = self._session_meta(json_path)
+            meta["json_mtime_iso"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime))
+            self._status["last"].update(meta)
+        except Exception:
+            pass
 
         try:
             from ..analysis.analyzer import AnalysisConfig, AutoCropConfig, TriangulationConfig, analyze_session_json
             from ..analysis.image_processing import CropConfig, LaserExtractConfig
         except ImportError:
             self.gcode.respond_info("rubidium: missing dependencies (opencv-python-headless, matplotlib, numpy)")
+            self._status = {"state": "error", "last": {"dir": str(scan_dir), "json": str(json_path), "error": "missing dependencies"}}
             return
 
         session_name = scan_dir.name
@@ -191,34 +203,59 @@ class RubidiumAnalyse:
         )
 
         self.gcode.respond_info(f"rubidium: analyzing session {scan_dir.name}...")
-        
+
         try:
             summary = analyze_session_json(json_path, cfg)
         except Exception as e:
             self.gcode.respond_info(f"rubidium analyse failed: {e}")
+            self._status = {
+                "state": "error",
+                "last": {"dir": str(scan_dir), "json": str(json_path), "error": str(e)},
+            }
             return
-        
-        for warn in getattr(summary, "warnings", []):
+
+        for warn in summary.warnings:
             self.gcode.respond_info(warn)
 
         if self.crop_auto_center:
             try:
                 ap = Path(str(output_dir)) / "autocrop.json"
                 if ap.exists():
-                    import json as _json
-                    d = _json.loads(ap.read_text(encoding="utf-8"))
+                    d = json.loads(ap.read_text(encoding="utf-8"))
                     cx, cy = d.get("center_xy") or (None, None)
                     space = str(d.get("center_space") or "")
                     if cx is not None and cy is not None:
-                        self.gcode.respond_info(f"rubidium autocrop: center={float(cx):.2f},{float(cy):.2f} ({space})")
+                        self.gcode.respond_info(f"rubidium autocrop: center={cx:.2f},{cy:.2f} ({space})")
             except Exception:
                 pass
 
         if not summary.results:
             self.gcode.respond_info("rubidium analyse: no valid clips found to analyze.")
+            self._status["state"] = "done"
+            self._status["last"]["best"] = None
             return
 
-        if summary.best:
-            self.gcode.respond_info(self._format_best_value(summary.best))
-        else:
+        best = summary.best
+        if best is None:
             self.gcode.respond_info("rubidium analyse complete, no clear winner.")
+            self._status["state"] = "done"
+            self._status["last"]["best"] = None
+            return
+
+        if best.pa2 is None:
+            msg = f"rubidium analyse: best-value={best.pa:.6f} (score={best.breakdown.score:.3f})"
+        else:
+            msg = f"rubidium analyse: best-value={best.pa:.6f},{best.pa2:.6f} (score={best.breakdown.score:.3f})"
+        if best.grid_row is not None and best.grid_col is not None:
+            msg += f" [r{best.grid_row},c{best.grid_col}]"
+
+        self.gcode.respond_info(msg)
+
+        self._status["state"] = "done"
+        self._status["last"]["best"] = {
+            "param": best.pa,
+            "param2": best.pa2,
+            "score": best.breakdown.score,
+            "grid_row": best.grid_row,
+            "grid_col": best.grid_col,
+        }

@@ -218,49 +218,42 @@ class LinesPatternType(PatternType):
         return False
 
     def build(self, *, settings: Dict[str, Any], segments: List[Tuple[str, float]]) -> Lines:
-        param_start = float(settings["param_start"])
-        param_stop = float(settings["param_stop"])
-        param_count = int(settings["param_count"])
-        origin_x = float(settings["origin_x"])
-        origin_y = float(settings["origin_y"])
-        origin_z = float(settings["origin_z"])
-        line_length = float(settings["line_length"])
-        line_spacing = float(settings["line_spacing"])
+        s = settings
+        count: int = s["param_count"]
+        z = s["origin_z"] + s["layer_height"]
 
-        count = max(1, param_count)
         lines_list: List[Line] = []
         for idx in range(count):
-            pa = _param_at(idx, count, param_start, param_stop)
-            y = origin_y + line_spacing * idx
+            pa = _param_at(idx, count, s["param_start"], s["param_stop"])
+            y = s["origin_y"] + s["line_spacing"] * idx
 
             reverse = self._reverse_for_idx(idx)
-            start_pt = Pt(origin_x + (line_length if reverse else 0.0), y, origin_z)
-            end_pt = Pt(origin_x + (0.0 if reverse else line_length), y, origin_z)
+            start_pt = Pt(s["origin_x"] + (s["line_length"] if reverse else 0.0), y, z)
+            end_pt   = Pt(s["origin_x"] + (0.0 if reverse else s["line_length"]), y, z)
 
             segs = _build_segments_x(
-                x_left=origin_x,
+                x_left=s["origin_x"],
                 y=y,
-                z=origin_z,
-                line_length=line_length,
+                z=z,
+                line_length=s["line_length"],
                 segments=segments,
                 reverse=reverse,
             )
 
-            lines_list.append(
-                Line(
-                    idx=idx,
-                    parameter_value=pa,
-                    start=start_pt,
-                    end=end_pt,
-                    segments=segs,
-                )
-            )
+            lines_list.append(Line(
+                idx=idx,
+                parameter_value=pa,
+                start=start_pt,
+                end=end_pt,
+                segments=segs,
+            ))
+
         return Lines(tuple(lines_list))
 
     def build_keepout(self, *, settings: Dict[str, Any], segments: List[Tuple[str, float]]) -> Lines:
         s2 = dict(settings)
-        s2["param_count"] = int(settings["param_count"]) + 2
-        s2["origin_y"] = float(settings["origin_y"]) - float(settings["line_spacing"])
+        s2["param_count"] = settings["param_count"] + 2
+        s2["origin_y"] = settings["origin_y"] - settings["line_spacing"]
         return self.build(settings=s2, segments=segments)
 
 
@@ -309,23 +302,24 @@ class GridPatternBase(PatternType):
         return False
 
     def build(self, *, settings: Dict[str, Any], segments: List[Tuple[str, float]]) -> Lines:
-        p1_start = float(settings["param_start"])
-        p1_stop = float(settings["param_stop"])
-        cols = max(1, int(settings["param_count"]))
+        p1_start = settings["param_start"]
+        p1_stop = settings["param_stop"]
+        cols: int = settings["param_count"]
 
-        p2_start = float(settings["param2_start"])
-        p2_stop = float(settings["param2_stop"])
-        rows = max(1, int(settings["param2_count"]))
+        p2_start = settings["param2_start"]
+        p2_stop = settings["param2_stop"]
+        rows: int = settings["param2_count"]
 
-        origin_x = float(settings["origin_x"])
-        origin_y = float(settings["origin_y"])
-        origin_z = float(settings["origin_z"])
+        origin_x = settings["origin_x"]
+        origin_y = settings["origin_y"]
+        z = settings["origin_z"] + settings["layer_height"]
 
-        line_length = float(settings["line_length"])
-        dx = float(settings["grid_spacing_x"])
-        dy = float(settings["grid_spacing_y"])
+        line_length = settings["line_length"]
+        dx = settings["grid_spacing_x"]
+        dy = settings["grid_spacing_y"]
 
         lines_list: List[Line] = []
+        idx = 0
         for r in range(rows):
             snake = self._snake_for_row(r)
             cols_iter = range(cols - 1, -1, -1) if snake else range(cols)
@@ -336,33 +330,31 @@ class GridPatternBase(PatternType):
                 x_left = origin_x + dx * c
                 y = origin_y + dy * r
 
-                reverse = bool(snake)  # snake rows print right->left for continuity
-                start_pt = Pt(x_left + (line_length if reverse else 0.0), y, origin_z)
-                end_pt = Pt(x_left + (0.0 if reverse else line_length), y, origin_z)
+                reverse_dir = snake
+                start_pt = Pt(x_left + (line_length if reverse_dir else 0.0), y, z)
+                end_pt = Pt(x_left + (0.0 if reverse_dir else line_length), y, z)
 
                 segs = _build_segments_x(
-                    x_left=x_left,
-                    y=y,
-                    z=origin_z,
+                    x_left=x_left, y=y, z=z,
                     line_length=line_length,
                     segments=segments,
-                    reverse=reverse,
+                    reverse=reverse_dir,
                 )
 
-                lines_list.append(
-                    Line(
-                        idx=len(lines_list),
-                        parameter_value=pa1,
-                        parameter_value2=pa2,
-                        start=start_pt,
-                        end=end_pt,
-                        segments=segs,
-                        grid_row=r,
-                        grid_col=c,
-                    )
-                )
+                lines_list.append(Line(
+                    idx=idx,
+                    parameter_value=pa1,
+                    parameter_value2=pa2,
+                    start=start_pt,
+                    end=end_pt,
+                    segments=segs,
+                    grid_row=r,
+                    grid_col=c,
+                ))
+                idx += 1
 
         return Lines(tuple(lines_list))
+
 
     def build_keepout(self, *, settings: Dict[str, Any], segments: List[Tuple[str, float]]) -> Lines:
         cols = max(1, int(settings["param_count"]))

@@ -9,7 +9,7 @@ import shlex
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, List, Dict
 
@@ -21,12 +21,20 @@ class CmdStartRecording:
     cmd_args: List[str]
     log_path: Path
     json_path: Path
+    session_meta: Dict[str, Any] = field(default_factory=dict)
     request_mono: float = 0.0
+
+
+@dataclass
+class StopCompletion:
+    event: threading.Event = field(default_factory=threading.Event)
+    result: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class CmdStopRecording:
     finalize: bool
+    completion: Optional[StopCompletion] = None
 
 
 @dataclass
@@ -102,12 +110,14 @@ class VideoEngine(threading.Thread):
             "file": str(cmd.output_path),
             "start_time": time.time(),
             "active": True,
-            "startup_lag": 0.0
+            "startup_lag": 0.0,
+            "meta": dict(cmd.session_meta or {}),
         }
         self.marks_list = []
         self.clips_list = []
         self.pending_cuts = []
 
+        log_f = None
         try:
             try:
                 log_f = open(cmd.log_path, "w", encoding="utf-8")
@@ -115,7 +125,7 @@ class VideoEngine(threading.Thread):
                 log_f = open(os.devnull, "w")
 
             spawn_start_mono = time.monotonic()
-            
+
             self._proc = subprocess.Popen(
                 cmd.cmd_args,
                 stdout=log_f,
@@ -129,6 +139,9 @@ class VideoEngine(threading.Thread):
             logging.error(f"rubidium_video: failed to start ffmpeg: {e}")
             self.session_data["error"] = str(e)
             return
+        finally:
+            if log_f is not None:
+                log_f.close()
 
         logging.info("rubidium_video: waiting for video file to appear...")
         
@@ -166,13 +179,33 @@ class VideoEngine(threading.Thread):
                 self._proc.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
-            
+                try:
+                    self._proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    logging.warning("rubidium_video: ffmpeg did not exit after kill()")
+
             self.session_data["active"] = False
             self.session_data["returncode"] = self._proc.returncode
             self._proc = None
 
-        if cmd.finalize:
-            self._run_post_processing()
+        err: Optional[str] = None
+        try:
+            if cmd.finalize:
+                self._run_post_processing()
+        except Exception as e:
+            logging.exception("rubidium_video: finalize/post-processing failed")
+            err = str(e)
+        finally:
+            if cmd.completion is not None:
+                cmd.completion.result = {
+                    "ok": err is None,
+                    "error": err,
+                    "json": str(self.json_path) if self.json_path else None,
+                    "session_id": self.session_data.get("id"),
+                    "clips": len(self.clips_list),
+                    "marks": len(self.marks_list),
+                }
+                cmd.completion.event.set()
 
     def _flush_json(self):
         if not self.json_path:
@@ -199,7 +232,7 @@ class VideoEngine(threading.Thread):
         except Exception:
             pass
 
-        for cut_job in self.pending_cuts:
+        for cut_job in list(self.pending_cuts):
             success = self._exec_ffmpeg_cut(cut_job)
             
             result_record = cut_job.clip_metadata.copy()
@@ -208,6 +241,8 @@ class VideoEngine(threading.Thread):
             self.clips_list.append(result_record)
             
             self._flush_json()
+
+        self.pending_cuts.clear()
 
     def _exec_ffmpeg_cut(self, job: CmdQueueCut) -> bool:
         """Directly runs ffmpeg to cut the clip"""
