@@ -100,6 +100,81 @@ def render_score_lineplot(
     return img
 
 
+def render_score_surface_plot(
+    x_vals: List[float],
+    y_vals: List[float],
+    z_vals: List[float],
+    *,
+    width_px: int = 900,
+    height_px: int = 900,
+    interp: bool = True,
+) -> np.ndarray:
+    """Render a 3D surface plot (score vs param1/param2)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.tri as mtri
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+    xs = np.asarray(x_vals, dtype=np.float32)
+    ys = np.asarray(y_vals, dtype=np.float32)
+    zs = np.asarray(z_vals, dtype=np.float32)
+
+    ok = np.isfinite(xs) & np.isfinite(ys) & np.isfinite(zs)
+    xs = xs[ok]
+    ys = ys[ok]
+    zs = zs[ok]
+
+    if xs.size == 0:
+        return np.zeros((height_px, width_px, 3), dtype=np.uint8)
+
+    dpi = 100
+    fig = plt.figure(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
+    ax = fig.add_subplot(111, projection="3d")
+    ax.view_init(elev=35, azim=235)
+    ax.set_xlabel("param1")
+    ax.set_ylabel("param2")
+    ax.set_zlabel("score")
+    ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.4)
+    try:
+        ax.set_box_aspect((1.0, 1.0, 0.6))
+    except Exception:
+        pass
+
+    try:
+        if xs.size >= 3:
+            tri = mtri.Triangulation(xs, ys)
+            if interp and xs.size >= 4:
+                xi = np.linspace(float(xs.min()), float(xs.max()), 40)
+                yi = np.linspace(float(ys.min()), float(ys.max()), 40)
+                xi, yi = np.meshgrid(xi, yi)
+                interp_f = mtri.LinearTriInterpolator(tri, zs)
+                zi = interp_f(xi, yi)
+                zi = np.ma.masked_invalid(zi)
+                ax.plot_surface(xi, yi, zi, cmap="viridis", linewidth=0, antialiased=True)
+            else:
+                ax.plot_trisurf(tri, zs, cmap="viridis", linewidth=0.2, antialiased=True)
+        ax.scatter(xs, ys, zs, c="k", s=12, depthshade=True)
+    except Exception:
+        ax.scatter(xs, ys, zs, c="k", s=12, depthshade=True)
+
+    io_buf = io.BytesIO()
+    fig.savefig(io_buf, format="png", dpi=dpi)
+    plt.close(fig)
+    io_buf.seek(0)
+
+    file_bytes = np.asarray(bytearray(io_buf.read()), dtype=np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+    if img is None:
+        img = np.zeros((height_px, width_px, 3), dtype=np.uint8)
+
+    if img.shape[0] != height_px or img.shape[1] != width_px:
+        img = cv2.resize(img, (width_px, height_px), interpolation=cv2.INTER_AREA)
+
+    return img
+
+
 def create_debug_thumbnails(
     crop: np.ndarray, mask: np.ndarray, centroids: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -755,9 +830,22 @@ def save_dashboard(results: List, out_path: Path, *, debug: Optional[Dict[str, A
 
     width = int(body.shape[1])
 
-    xs = [float(getattr(r, "pa", 0.0)) for r in results]
-    ys = [float(r.breakdown.score) for r in results]
-    plot = render_score_lineplot(xs, ys, width_px=width, height_px=220)
+    if is_grid:
+        xs = []
+        ys = []
+        zs = []
+        for r in results:
+            pa2 = getattr(r, "pa2", None)
+            if pa2 is None:
+                continue
+            xs.append(float(getattr(r, "pa", 0.0)))
+            ys.append(float(pa2))
+            zs.append(float(getattr(r.breakdown, "score", 0.0)))
+        plot = render_score_surface_plot(xs, ys, zs, width_px=width, height_px=width)
+    else:
+        xs = [float(getattr(r, "pa", 0.0)) for r in results]
+        ys = [float(r.breakdown.score) for r in results]
+        plot = render_score_lineplot(xs, ys, width_px=width, height_px=220)
 
     dbg = _render_debug_panel(results=results, debug=debug, width_px=width, height_px=220)
 

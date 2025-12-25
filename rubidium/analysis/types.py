@@ -12,7 +12,7 @@ from .scoring import ScoreBreakdown
 
 
 _BUMP_MIN_PX = 1.0
-_BUMP_FAIL_SCORE = 100.0
+_BUMP_FAIL_SCORE = 3.0
 
 
 @dataclass(slots=True)
@@ -29,7 +29,7 @@ class TriangulationConfig:
     bed_plane_abcd: Optional[Tuple[float, float, float, float]] = None
     min_valid_frac: float = 0.0
     min_height_range: float = 0.0
-    gate_fail_score: float = 100.0
+    gate_fail_score: float = 3.0
 
 
 @dataclass(slots=True)

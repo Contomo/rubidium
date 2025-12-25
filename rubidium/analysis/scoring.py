@@ -36,19 +36,15 @@ def score_heightmap(
 
     hm = height_map.astype(np.float32)
 
-    # Dropout penalty: fraction of missing values.
     drop_frac = float(np.mean(~np.isfinite(hm)))
     dropouts = 10.0 * drop_frac
 
-    # Use the middle portion to measure stability.
-    a = max(0, int(frames * 0.25))
-    b = min(frames, int(frames * 0.75))
+    a = max(0, int(frames * 0.10))
+    b = min(frames, int(frames * 0.90))
     mid = hm[a:b] if (b - a) >= 2 else hm
 
-    # Roughness: average std dev across time per bin.
     roughness = _nanmean(np.nanstd(mid, axis=0))
 
-    # Transient penalty: how different are the edges from the middle.
     ef = int(max(1, min(edge_frames, frames // 3)))
     start = hm[:ef]
     end = hm[-ef:]
@@ -59,7 +55,6 @@ def score_heightmap(
 
     transient = _nanmean(np.abs(start_mean - mid_mean)) + _nanmean(np.abs(end_mean - mid_mean))
 
-    # Combine. Weights are intentionally mild; your data will dominate.
     score = float(roughness + 0.5 * transient + dropouts)
 
     return ScoreBreakdown(score=score, roughness=roughness, transient=transient, dropouts=dropouts)

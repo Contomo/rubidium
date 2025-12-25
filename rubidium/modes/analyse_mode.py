@@ -56,7 +56,7 @@ class RubidiumAnalyse:
         self.bed_plane = self.cv.get_str_opt("bed_plane")
         self.triangulate_min_valid_frac = self.cv.get_float("triangulate_min_valid_frac", 0.0, minval=0.0, maxval=1.0)
         self.triangulate_min_height_range = self.cv.get_float("triangulate_min_height_range", 0.0, minval=0.0)
-        self.triangulate_gate_fail_score = self.cv.get_float("triangulate_gate_fail_score", 100.0, minval=0.0)
+        self.triangulate_gate_fail_score = self.cv.get_float("triangulate_gate_fail_score", 3.0, minval=0.0)
 
         self.gcode.register_command(
             "RUBIDIUM_ANALYSE",
