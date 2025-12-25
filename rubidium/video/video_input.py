@@ -205,7 +205,8 @@ class VideoInput:
         if offset is None: return
         if self._old_latency_s is None:
             self._old_latency_s = self.latency_s
-        self.latency_s = offset
+        # G-code override uses ms like config; store seconds internally.
+        self.latency_s = float(offset) / 1000.0
 
     def reset_latency_offset(self):
         if self._old_latency_s is None: return
@@ -242,8 +243,7 @@ class VideoInput:
                 output_path=video_path,
                 cmd_args=cmd_args,
                 log_path=log_path,
-                json_path=json_path,
-                start_eventtime=eventtime
+                json_path=json_path
             ))
 
         self._planner_cb.schedule_cb(_start_cb, payload=None)
@@ -271,6 +271,7 @@ class VideoInput:
         def _mark_cb(eventtime: float, print_time: float, pl: dict[str, Any]) -> None:
             if self._session_start_pt is None: return
 
+            # Latency shifts marks earlier in time (compensation).
             t_s = (print_time - self._session_start_pt) - self.latency_s
             t_s = max(0.0, t_s) 
 

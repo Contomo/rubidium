@@ -21,7 +21,7 @@ class CmdStartRecording:
     cmd_args: List[str]
     log_path: Path
     json_path: Path
-    start_eventtime: float  # reactor monotonic
+    request_mono: float = 0.0
 
 
 @dataclass
@@ -66,6 +66,8 @@ class VideoEngine(threading.Thread):
         self.nice_level = nice_level
 
     def submit(self, cmd: Any):
+        if isinstance(cmd, CmdStartRecording):
+            cmd.request_mono = time.monotonic()
         self._queue.put(cmd)
 
     def run(self):
@@ -149,7 +151,7 @@ class VideoEngine(threading.Thread):
             logging.warning("rubidium_video: timed out waiting for file creation, sync might be off")
             real_start_mono = spawn_start_mono
 
-        self._startup_lag = real_start_mono - cmd.start_eventtime
+        self._startup_lag = real_start_mono - cmd.request_mono
         self.session_data["startup_lag"] = self._startup_lag
         
         logging.info(f"rubidium_video: sync established. startup_lag={self._startup_lag:.4f}s")
