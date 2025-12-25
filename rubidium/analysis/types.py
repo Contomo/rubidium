@@ -58,6 +58,7 @@ class AnalysisConfig:
     write_npz: bool = True
     output_dir: Optional[str] = None
     pipeline_steps: Optional[List[str]] = None
+    score_trim_frac: float = 0.10
 
 
 @dataclass(slots=True)

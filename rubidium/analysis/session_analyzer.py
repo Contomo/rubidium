@@ -114,7 +114,7 @@ class SessionAnalyzer:
         csv_path = outdir / "summary.csv"
         with csv_path.open("w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["idx", "pa", "pa2", "grid_row", "grid_col", "score", "roughness", "transient", "dropouts", "pk_pk_px", "bump_px"])
+            w.writerow(["idx", "pa", "pa2", "grid_row", "grid_col", "score", "roughness", "dropouts", "pk_pk_px", "bump_px"])
             for r in results:
                 pk_pk = 0.0
                 if r.height_map is not None:
@@ -129,7 +129,6 @@ class SessionAnalyzer:
                     int(r.grid_col) if r.grid_col is not None else "",
                     float(r.breakdown.score),
                     float(r.breakdown.roughness),
-                    float(r.breakdown.transient),
                     float(r.breakdown.dropouts),
                     float(pk_pk),
                     float(r.bump_px) if r.bump_px is not None else "",

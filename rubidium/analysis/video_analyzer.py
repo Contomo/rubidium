@@ -36,7 +36,7 @@ class VideoAnalyzer:
                 video_path=path,
                 idx=idx,
                 pa=pa,
-                breakdown=ScoreBreakdown(float("inf"), float("inf"), 0.0, 1.0),
+                breakdown=ScoreBreakdown(score=float("inf"), roughness=float("inf"), dropouts=1.0),
                 height_map_kind="err",
                 ok=False,
             )
@@ -115,7 +115,7 @@ class VideoAnalyzer:
                 video_path=path,
                 idx=idx,
                 pa=pa,
-                breakdown=ScoreBreakdown(float("inf"), float("inf"), 0.0, 1.0),
+                breakdown=ScoreBreakdown(score=float("inf"), roughness=float("inf"), dropouts=1.0),
                 height_map_kind="empty",
                 ok=False,
             )
@@ -128,14 +128,16 @@ class VideoAnalyzer:
             mirror_x=mirror_x,
         )
 
-        breakdown = score_heightmap(height_map)
+        breakdown = score_heightmap(
+            height_map,
+            trim_frac=float(self.cfg.score_trim_frac),
+        )
 
         bump_px = float(_profile_bump_px(center_map))
         if not tri_ok and bump_px < float(_BUMP_MIN_PX):
             breakdown = ScoreBreakdown(
                 score=max(float(breakdown.score), float(_BUMP_FAIL_SCORE)),
                 roughness=breakdown.roughness,
-                transient=breakdown.transient,
                 dropouts=breakdown.dropouts,
             )
             height_map_kind = "pixel_gate"
@@ -259,7 +261,6 @@ class VideoAnalyzer:
         return ScoreBreakdown(
             score=max(float(breakdown.score), float(tri.gate_fail_score)),
             roughness=breakdown.roughness,
-            transient=breakdown.transient,
             dropouts=breakdown.dropouts,
         )
 

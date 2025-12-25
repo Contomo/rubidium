@@ -277,7 +277,7 @@ class RubidiumPrint(RubidiumBase):
             ):
                 yield ln
 
-            yield f"G0 X{pl.start.x + offx:.3f} Y{pl.start.y + offy:.3f} Z{pl.start.z + offz:.3f} F{fast_feed:.1f}"
+            yield f"G0 X{pl.start.x + offx:.3f} Y{pl.start.y + offy:.3f} Z{pl.start.z + offz + layer_h:.3f} F{fast_feed:.1f}"
 
             yield (tuning_fmt % (pl.parameter_value,))
 

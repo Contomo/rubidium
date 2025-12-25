@@ -49,6 +49,7 @@ class RubidiumAnalyse:
 
         self.frame_step = self.cv.get_int("analysis_frame_step", 1, minval=1)
         self.max_frames = self.cv.get_int("analysis_max_frames", 0, minval=0)
+        self.score_trim_frac = self.cv.get_float("analysis_trim_frac", 0.10, minval=0.0, maxval=0.45)
 
         self.triangulate_enable = self.cv.get_bool("triangulate_enable", False)
         self.camera_calibration = self.cv.get_str_opt("camera_calibration")
@@ -186,6 +187,7 @@ class RubidiumAnalyse:
             write_npz=bool(self.write_npz),
             output_dir=str(output_dir),
             pipeline_steps=pipeline_steps,
+            score_trim_frac=float(self.score_trim_frac),
         )
 
         self.gcode.respond_info(f"rubidium: analyzing session {scan_dir.name}...")
