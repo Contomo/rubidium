@@ -358,88 +358,55 @@ def _render_debug_panel(
         lines.append(_fmt_crop("crop(final):", crop_f))
 
     ac_cfg = debug.get("autocrop") or {}
-    ac_enabled = bool(ac_cfg.get("enable", False)) if isinstance(ac_cfg, dict) else False
+    ac_enabled = bool(isinstance(ac_cfg, dict) and ac_cfg.get("enable"))
     if ac_enabled:
-        search_wh = ac_cfg.get("search_wh") if isinstance(ac_cfg, dict) else None
-        spc = ac_cfg.get("samples_per_clip") if isinstance(ac_cfg, dict) else None
-        kp = ac_cfg.get("keep_percentile") if isinstance(ac_cfg, dict) else None
-        mk = ac_cfg.get("min_kept") if isinstance(ac_cfg, dict) else None
-        ms = ac_cfg.get("max_samples") if isinstance(ac_cfg, dict) else None
         parts = ["autocrop: enabled"]
-        if isinstance(search_wh, (list, tuple)) and len(search_wh) >= 2:
-            parts.append(f"search={int(search_wh[0])}x{int(search_wh[1])}")
-        if spc is not None:
-            parts.append(f"samples/clip={int(spc)}")
-        if ms is not None and int(ms) > 0:
-            parts.append(f"max={int(ms)}")
-        if kp is not None:
-            parts.append(f"keep%={float(kp):.1f}")
-        if mk is not None:
-            parts.append(f"min_kept={int(mk)}")
+        stats = ac_cfg.get("stats") if isinstance(ac_cfg.get("stats"), dict) else {}
+        if isinstance(stats, dict):
+            status = stats.get("status")
+            if status:
+                parts.append(f"status={status}")
+            applied = stats.get("applied")
+            if applied is not None:
+                parts.append(f"applied={int(bool(applied))}")
+            wh = stats.get("frame_wh")
+            if isinstance(wh, (list, tuple)) and len(wh) >= 2:
+                parts.append(f"out={int(wh[0])}x{int(wh[1])}")
+            n_samples = stats.get("n_samples")
+            n_valid = stats.get("n_valid")
+            if n_samples is not None or n_valid is not None:
+                bits = []
+                if n_samples is not None:
+                    bits.append(f"samples={int(n_samples)}")
+                if n_valid is not None:
+                    bits.append(f"valid={int(n_valid)}")
+                if bits:
+                    parts.append(",".join(bits))
+            cxy = stats.get("center_xy")
+            space = str(stats.get("center_space") or "")
+            if isinstance(cxy, (list, tuple)) and len(cxy) >= 2:
+                s = f"center=({float(cxy[0]):.2f},{float(cxy[1]):.2f})"
+                if space:
+                    s += f"[{space}]"
+                parts.append(s)
         lines.append(" | ".join(parts))
+
+        rejects = ac_cfg.get("rejects")
+        if isinstance(rejects, dict) and rejects:
+            pairs = []
+            for k, v in rejects.items():
+                try:
+                    pairs.append((str(k), int(v)))
+                except Exception:
+                    continue
+            pairs.sort(key=lambda kv: (-kv[1], kv[0]))
+            if pairs:
+                msg = ", ".join([f"{k}={v}" for (k, v) in pairs[:6]])
+                lines.append(f"autocrop(rejects): {msg}")
     else:
         lines.append("autocrop: disabled")
 
-    # autocrop.json summary if present
     out_dir_s = str(debug.get("output_dir") or "")
-    if out_dir_s:
-        ap = Path(out_dir_s) / "autocrop.json"
-        if ap.exists():
-            try:
-                d = json.loads(ap.read_text(encoding="utf-8"))
-                status = str(d.get("status") or "")
-                applied = d.get("applied")
-                cxy = d.get("center_xy")
-                space = str(d.get("center_space") or "")
-                st = d.get("samples_total")
-                sv = d.get("samples_valid")
-                sk = d.get("samples_kept")
-                thr = d.get("score_threshold")
-                mad = d.get("mad_px")
-                line = "autocrop(result):"
-                if status:
-                    line += f" status={status}"
-                if applied is not None:
-                    try:
-                        line += f" applied={int(bool(applied))}"
-                    except Exception:
-                        pass
-                if isinstance(cxy, (list, tuple)) and len(cxy) >= 2:
-                    line += f" center=({float(cxy[0]):.2f},{float(cxy[1]):.2f})"
-                    if space:
-                        line += f"[{space}]"
-                bits = []
-                if st is not None:
-                    bits.append(f"samples={int(st)}")
-                if sv is not None:
-                    bits.append(f"valid={int(sv)}")
-                if sk is not None:
-                    bits.append(f"kept={int(sk)}")
-                if thr is not None:
-                    bits.append(f"thr={float(thr):.3g}")
-                if isinstance(mad, (list, tuple)) and len(mad) >= 2:
-                    bits.append(f"mad=({float(mad[0]):.2f},{float(mad[1]):.2f})")
-                if bits:
-                    line += " | " + ", ".join(bits)
-                lines.append(line)
-
-                rejects = d.get("rejects")
-                if isinstance(rejects, dict) and rejects:
-                    pairs = []
-                    for k, v in rejects.items():
-                        try:
-                            pairs.append((str(k), int(v)))
-                        except Exception:
-                            continue
-                    pairs.sort(key=lambda kv: (-kv[1], kv[0]))
-                    if pairs:
-                        # Keep it compact; show the most common reasons.
-                        msg = ", ".join([f"{k}={v}" for (k, v) in pairs[:6]])
-                        lines.append(f"autocrop(rejects): {msg}")
-            except Exception:
-                lines.append("autocrop(result): failed to read autocrop.json")
-        elif ac_enabled:
-            lines.append("autocrop(result): no autocrop.json (failed/early-exit)")
 
     # best line summary
     if results:

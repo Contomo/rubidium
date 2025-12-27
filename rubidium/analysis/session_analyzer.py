@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import csv
 import json
-from dataclasses import replace
+from dataclasses import replace, asdict
 from pathlib import Path
 from typing import List, Optional
 
@@ -48,7 +48,6 @@ class SessionAnalyzer:
             autocrop_state = ac.run(clips)
             if autocrop_state is not None:
                 warnings.append(f"autocrop: status={autocrop_state.status} (applied={int(autocrop_state.applied)})")
-                warnings.append("autocrop: wrote autocrop.json + autocrop_points.csv + autocrop_preview.jpg + autocrop_final.jpg + autocrop_mask.jpg")
                 if autocrop_state.applied:
                     cfg_run = replace(cfg_run, crop=replace(cfg_run.crop, center_xy=autocrop_state.center_xy))
 
@@ -150,10 +149,14 @@ class SessionAnalyzer:
         autocrop_state,
     ) -> SessionDebug:
         ac_rejects = getattr(autocrop_state, "rejects", None) if autocrop_state is not None else None
-        ac_stats = getattr(autocrop_state, "to_json", None)() if autocrop_state is not None else None
-        if isinstance(ac_stats, dict):
-            # remove redundant keys for readability
-            ac_stats.pop("rejects", None)
+        
+        # CRASH FIX: Use asdict instead of calling a non-existent method
+        ac_stats = None
+        if autocrop_state is not None:
+            ac_stats = asdict(autocrop_state)
+            # Remove redundant keys
+            if isinstance(ac_stats, dict):
+                ac_stats.pop("rejects", None)
 
         return SessionDebug(
             session=session,
@@ -170,12 +173,7 @@ class SessionAnalyzer:
             crop_initial=crop_initial,
             crop_final=crop_final,
             autocrop=AutoCropDebug(
-                enable=bool(cfg.autocrop.enable),
-                search_wh=cfg.autocrop.search_wh,
-                samples_per_clip=int(cfg.autocrop.samples_per_clip),
-                max_samples=int(cfg.autocrop.max_samples),
-                keep_percentile=float(cfg.autocrop.keep_percentile),
-                min_kept=int(cfg.autocrop.min_kept),
+                enable=cfg.autocrop.enable,
                 rejects=ac_rejects,
                 stats=ac_stats,
             ),

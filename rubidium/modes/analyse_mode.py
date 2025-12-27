@@ -25,13 +25,8 @@ class RubidiumAnalyse:
         self.write_npz = self.cv.get_bool("analysis_write_npz", False)
 
         self.crop_center = self.cv.get_str_opt("crop_center")
-        self.crop_search_size = self.cv.get_str_opt("crop_search_size")
         self.crop_size = self.cv.get_str_opt("crop_size")
         self.crop_auto_center = self.cv.get_bool("crop_auto_center", False)
-        self.crop_auto_center_samples_per_clip = self.cv.get_int("crop_auto_center_samples_per_clip", 1, minval=1)
-        self.crop_auto_center_keep_percentile = self.cv.get_float("crop_auto_center_keep_percentile", 50.0, minval=0.0, maxval=100.0)
-        self.crop_auto_center_max_samples = self.cv.get_int("crop_auto_center_max_samples", 0, minval=0)
-        self.crop_auto_center_min_kept = self.cv.get_int("crop_auto_center_min_kept", 8, minval=1)
         self.base_resolution = self.cv.get_str_opt("base_resolution")
 
         self.laser_hsv_lower = self.cv.get_str_opt("laser_hsv_lower")
@@ -141,7 +136,6 @@ class RubidiumAnalyse:
 
         crop = CropConfig()
         cc = self._parse_nums(self.crop_center, 2, float)
-        css = self._parse_nums(self.crop_search_size, 2, int)
         cs = self._parse_nums(self.crop_size, 2, int)
         br = self._parse_nums(self.base_resolution, 2, int)
         
@@ -185,14 +179,7 @@ class RubidiumAnalyse:
             crop=crop,
             laser=laser,
             triangulation=tri,
-            autocrop=AutoCropConfig(
-                enable=bool(self.crop_auto_center),
-                search_wh=(int(css[0]), int(css[1])) if css else None,
-                samples_per_clip=int(self.crop_auto_center_samples_per_clip),
-                max_samples=int(self.crop_auto_center_max_samples),
-                keep_percentile=float(self.crop_auto_center_keep_percentile),
-                min_kept=int(self.crop_auto_center_min_kept),
-            ),
+            autocrop=AutoCropConfig(enable=self.crop_auto_center),
             frame_step=int(self.frame_step),
             max_frames=int(self.max_frames),
             write_plots=bool(self.write_plots),

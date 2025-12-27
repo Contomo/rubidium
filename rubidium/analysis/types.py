@@ -34,19 +34,11 @@ class TriangulationConfig:
 
 @dataclass(slots=True)
 class AutoCropConfig:
-    """Session-wide crop-center prepass."""
-
     enable: bool = False
-    # None means "use full frame".
-    search_wh: Optional[Tuple[int, int]] = None
-    samples_per_clip: int = 1
-    max_samples: int = 0  # 0 -> no explicit cap
-    keep_percentile: float = 50.0
-    min_kept: int = 8
-
 
 @dataclass(slots=True)
 class AnalysisConfig:
+
     crop: CropConfig = field(default_factory=CropConfig)
     laser: LaserExtractConfig = field(default_factory=LaserExtractConfig)
     triangulation: TriangulationConfig = field(default_factory=TriangulationConfig)

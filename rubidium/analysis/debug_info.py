@@ -42,23 +42,13 @@ class SessionCounts:
 @dataclass(slots=True)
 class AutoCropDebug:
     enable: bool
-    search_wh: Optional[Tuple[int, int]]
-    samples_per_clip: int
-    max_samples: int
-    keep_percentile: float
-    min_kept: int
-    # extra runtime signals (optional)
+    # Runtime signals (optional). These come from autocrop.json generation.
     rejects: Optional[Dict[str, int]] = None
     stats: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {
-            "enable": bool(self.enable),
-            "search_wh": list(self.search_wh) if self.search_wh is not None else None,
-            "samples_per_clip": int(self.samples_per_clip),
-            "max_samples": int(self.max_samples),
-            "keep_percentile": float(self.keep_percentile),
-            "min_kept": int(self.min_kept),
+            "enable": self.enable,
         }
         if self.rejects:
             d["rejects"] = dict(self.rejects)
@@ -69,6 +59,7 @@ class AutoCropDebug:
 
 @dataclass(slots=True)
 class TriangulationDebug:
+
     enabled: bool
     camera_calibration_path: Optional[str]
     laser_plane_abcd: Optional[Tuple[float, float, float, float]]
