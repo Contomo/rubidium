@@ -9,7 +9,7 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
-from .image_processing import CropConfig, build_laser_pipeline, run_pipeline
+from .image_processing import CropConfig, clamp_center_to_crop_bounds, build_laser_pipeline, run_pipeline
 from .scoring import ScoreBreakdown, score_heightmap
 from .types import (
     _BUMP_FAIL_SCORE,
@@ -22,13 +22,22 @@ from .visualization import create_debug_thumbnails, render_heightmap_plot
 
 
 class VideoAnalyzer:
-    def __init__(self, cfg: AnalysisConfig) -> None:
+    def __init__(self, cfg: AnalysisConfig, *, autocrop_curve: Optional[object] = None) -> None:
         self.cfg = cfg
         self.steps = build_laser_pipeline(cfg.pipeline_steps)
+        self.autocrop_curve = autocrop_curve
         self._calib_cache: Optional[CameraCalibration] = None
         self._calib_path: Optional[str] = None
 
-    def analyze(self, *, path: Path, idx: int, pa: float, mirror_x: bool = False) -> LineAnalysis:
+    def analyze(
+        self,
+        *,
+        path: Path,
+        idx: int,
+        pa: float,
+        mirror_x: bool = False,
+        global_start: Optional[int] = None,
+    ) -> LineAnalysis:
         cap = cv2.VideoCapture(str(path))
         if not cap.isOpened():
             logging.warning(f"rubidium: failed to open video: {path}")
@@ -46,13 +55,14 @@ class VideoAnalyzer:
 
         crop_cfg = None
         centers: List[np.ndarray] = []
+        offsets: List[Tuple[int, int]] = []
         kept = 0
         frames_seen = 0
 
         t_crop = t_mask = t_track = None
         expected_h: Optional[int] = None
-        offset_xy: Optional[Tuple[int, int]] = None
         frame_w: Optional[int] = None
+        use_dynamic_crop = (self.autocrop_curve is not None) and (global_start is not None)
 
         while True:
             ok, frame = cap.read()
@@ -61,41 +71,41 @@ class VideoAnalyzer:
 
             frames_seen += 1
 
-            if crop_cfg is None:
-                crop_cfg = self._build_crop_cfg(first_frame=frame, mirror_x=mirror_x)
-
             if mirror_x:
                 frame = cv2.flip(frame, 1)
+
+            if crop_cfg is None and not use_dynamic_crop:
+                crop_cfg = self._build_crop_cfg(first_frame=frame, mirror_x=mirror_x)
 
             is_process = (self.cfg.frame_step == 1) or ((frames_seen - 1) % self.cfg.frame_step == 0)
             is_debug = frames_seen == debug_frame_idx
             if not is_process and not is_debug:
                 continue
 
-            ctx = run_pipeline(
-                frame,
-                self.steps,
-                cfg_crop=crop_cfg,
-                cfg_laser=self.cfg.laser,
-                keep_debug=False,
-            )
+            cfg_crop = crop_cfg
+            if use_dynamic_crop:
+                fw = int(frame.shape[1])
+                fh = int(frame.shape[0])
+                t_global = int(global_start) + int(frames_seen - 1)
+                cx_raw, cy_raw = self.autocrop_curve.predict(t_global)  # type: ignore[attr-defined]
+                cx_proc = (float(fw - 1) - float(cx_raw)) if mirror_x else float(cx_raw)
+                cx_proc, cy_raw = clamp_center_to_crop_bounds((cx_proc, cy_raw), (fw, fh), self.cfg.crop.wh)
+                cfg_crop = CropConfig(center_xy=(float(cx_proc), float(cy_raw)), wh=self.cfg.crop.wh, ref_wh=None)
+
+            ctx = run_pipeline(frame, self.steps, cfg_crop=cfg_crop, cfg_laser=self.cfg.laser, keep_debug=False)
 
             if frame_w is None:
                 frame_w = int(frame.shape[1])
-            if offset_xy is None:
-                offset_xy = ctx.offset_xy
-
             cx = ctx.centroid_x
             if cx is not None:
                 if expected_h is None:
                     expected_h = int(cx.shape[0])
                 elif int(cx.shape[0]) != expected_h:
-                    # Crop height changing across frames is an invariant break.
-                    # Skip this frame; continuing keeps the run usable.
                     continue
 
             if is_process and cx is not None:
                 centers.append(cx)
+                offsets.append(ctx.offset_xy)
                 kept += 1
 
             if is_debug and ctx.mask_u8 is not None and cx is not None:
@@ -121,9 +131,10 @@ class VideoAnalyzer:
             )
 
         center_map = np.stack(centers, axis=0).astype(np.float32)
+        offsets_xy = np.asarray(offsets, dtype=np.int32)
         height_map, height_map_kind, tri_ok = self._compute_height_map(
             center_map=center_map,
-            offset_xy=offset_xy or (0, 0),
+            offsets_xy=offsets_xy,
             frame_w=int(frame_w or 0),
             mirror_x=mirror_x,
         )
@@ -165,6 +176,7 @@ class VideoAnalyzer:
                 str(npz_path),
                 height_map=height_map,
                 center_map=center_map,
+                offsets_xy=offsets_xy,
                 score=float(breakdown.score),
                 steps=step_names,
             )
@@ -208,7 +220,7 @@ class VideoAnalyzer:
         self,
         *,
         center_map: np.ndarray,
-        offset_xy: Tuple[int, int],
+        offsets_xy: np.ndarray,
         frame_w: int,
         mirror_x: bool,
     ) -> Tuple[np.ndarray, str, bool]:
@@ -232,7 +244,7 @@ class VideoAnalyzer:
             calib = self._load_calibration(tri.camera_calibration_path)
             tri_map = _triangulate_height_map(
                 center_map,
-                offset_xy=offset_xy,
+                offsets_xy=offsets_xy,
                 frame_w=frame_w,
                 mirror_x=bool(mirror_x),
                 calib=calib,
@@ -322,7 +334,7 @@ def _profile_bump_px(center_map: np.ndarray) -> float:
 def _triangulate_height_map(
     center_map_px: np.ndarray,
     *,
-    offset_xy: Tuple[int, int],
+    offsets_xy: np.ndarray,
     frame_w: int,
     mirror_x: bool,
     calib: CameraCalibration,
@@ -340,12 +352,15 @@ def _triangulate_height_map(
     frames, rows = center_map_px.shape
     out = np.full((frames, rows), np.nan, dtype=np.float32)
 
-    off_x = float(offset_xy[0])
-    off_y = float(offset_xy[1])
+    offsets_xy = np.asarray(offsets_xy, dtype=np.int32)
+    if offsets_xy.ndim != 2 or offsets_xy.shape[1] != 2 or offsets_xy.shape[0] != frames:
+        raise ValueError(f"invalid offsets_xy shape: {offsets_xy.shape} (expected ({frames},2))")
     k = np.asarray(calib.K, dtype=np.float32)
     dist = np.asarray(calib.dist, dtype=np.float32)
 
     for i in range(frames):
+        off_x = float(offsets_xy[i, 0])
+        off_y = float(offsets_xy[i, 1])
         cx = center_map_px[i]
         valid = np.isfinite(cx)
         if not np.any(valid):

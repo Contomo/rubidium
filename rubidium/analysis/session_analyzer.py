@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import json
+import time
 from dataclasses import replace, asdict
 from pathlib import Path
 from typing import List, Optional
@@ -43,13 +44,27 @@ class SessionAnalyzer:
         )
 
         autocrop_state = None
+        autocrop_curve = None
+        autocrop_global_start_by_idx = {}
+        t_autocrop = 0.0
         if cfg_run.autocrop.enable and clips:
             ac = AutoCropper(cfg_run, outdir=outdir)
-            autocrop_state = ac.run(clips)
+            t0 = time.perf_counter()
+            autocrop_state, autocrop_curve, autocrop_global_start_by_idx = ac.run(clips)
+            t_autocrop = time.perf_counter() - t0
             if autocrop_state is not None:
-                warnings.append(f"autocrop: status={autocrop_state.status} (applied={int(autocrop_state.applied)})")
+                warnings.append(
+                    f"autocrop: status={autocrop_state.status} (applied={int(autocrop_state.applied)})"
+                )
                 if autocrop_state.applied:
-                    cfg_run = replace(cfg_run, crop=replace(cfg_run.crop, center_xy=autocrop_state.center_xy))
+                    warnings.append(f"autocrop: dynamic crop enabled (curve={autocrop_state.curve_kind})")
+                ts = getattr(autocrop_state, 'timing_s', None)
+                if isinstance(ts, dict) and ts:
+                    keys = ('timeline', 'samples', 'samples_read', 'samples_crop', 'samples_detect', 'curve', 'debug')
+                    parts = [f"{k}={float(ts[k]):.3f}s" for k in keys if k in ts]
+                    if parts:
+                        warnings.append('autocrop timing: ' + ', '.join(parts))
+
 
         crop_final = CropDebug(
             center_xy=(float(cfg_run.crop.center_xy[0]), float(cfg_run.crop.center_xy[1])),
@@ -57,18 +72,30 @@ class SessionAnalyzer:
             ref_wh=tuple(cfg_run.crop.ref_wh) if cfg_run.crop.ref_wh is not None else None,
         )
 
-        video = VideoAnalyzer(cfg_run)
+        video = VideoAnalyzer(cfg_run, autocrop_curve=autocrop_curve)
         results: List[LineAnalysis] = []
         clips_analyzed = 0
+        t0 = time.perf_counter()
         for clip in clips:
             clips_analyzed += 1
-            res = video.analyze(path=clip.path, idx=clip.idx, pa=clip.pa, mirror_x=clip.mirror_x)
+            g0 = autocrop_global_start_by_idx.get(int(clip.idx), None)
+            res = video.analyze(
+                path=clip.path,
+                idx=clip.idx,
+                pa=clip.pa,
+                mirror_x=clip.mirror_x,
+                global_start=(None if g0 is None else int(g0)),
+            )
             if not res.ok:
                 continue
             res.pa2 = clip.pa2
             res.grid_row = clip.grid_row
             res.grid_col = clip.grid_col
             results.append(res)
+        t_analyze = time.perf_counter() - t0
+
+        if t_autocrop > 0.0 or t_analyze > 0.0:
+            warnings.append(f"timing: autocrop={t_autocrop:.2f}s analyze={t_analyze:.2f}s")
 
         # Ordering: primary param, secondary param, then idx.
         results.sort(key=lambda r: (float(r.pa), float(r.pa2) if r.pa2 is not None else float("-inf"), int(r.idx)))
