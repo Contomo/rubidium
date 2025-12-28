@@ -64,7 +64,20 @@ class RubidiumScan(RubidiumBase):
         if getattr(s, 'video_latency_ms', None) is not None:
             self.video.set_latency_offset(s["video_latency_ms"])
 
-        self.video.start_session(self._outdir, meta={"mode": "scan", "pattern": getattr(self, "_run_pattern_name", None)})
+        meta = {
+            "mode": "scan",
+            "pattern": getattr(self, "_run_pattern_name", None),
+        }
+        pat = getattr(self, "_run_pattern", None)
+        if pat is not None:
+            meta.update({
+                "tuning_command": str(pat.settings.get("tuning_command", "")).strip(),
+                "tuning_parameter": str(pat.settings.get("tuning_parameter", "")).strip(),
+                "tuning_command2": str(pat.settings.get("tuning_command2", "")).strip(),
+                "tuning_parameter2": str(pat.settings.get("tuning_parameter2", "")).strip(),
+            })
+
+        self.video.start_session(self._outdir, meta=meta)
 
         travel_speed = float(s.get("travel_speed", self.v_travel))
         scan_speed  = float(s.get("scan_speed", 10.0))

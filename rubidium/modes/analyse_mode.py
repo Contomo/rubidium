@@ -4,11 +4,10 @@ from __future__ import annotations
 import time, json
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from ..core.configview import ConfigView
 from ..analysis.graphing import RubidiumPaths
-
 
 class RubidiumAnalyse:
     def __init__(self, config) -> None:
@@ -62,7 +61,7 @@ class RubidiumAnalyse:
             desc=self.cmd_RUBIDIUM_ANALYSE_help
         )
 
-        self._status = {"state": "idle", "last": None}
+        self._status: Dict[str, Any] = {"result": None}
 
     def get_status(self, eventtime=None):
         return dict(self._status)
@@ -87,7 +86,7 @@ class RubidiumAnalyse:
             if len(parts) < n: return None
             return tuple(cast(parts[i]) for i in range(n))
         except Exception: return None
-        
+
     def _resolve_scan_dir(self, gcmd) -> Optional[Path]:
         self.paths.ensure_dirs()
         scan_root = self.paths.dirs.scan
@@ -113,23 +112,22 @@ class RubidiumAnalyse:
         if not json_path.exists():
             raise gcmd.error(f"rubidium: no session JSON found in {scan_dir.name}")
 
-        self._status = {"state": "running", "last": {"dir": str(scan_dir), "json": str(json_path)}}
+        result_data: Dict[str, Any] = {"dir": str(scan_dir), "json": str(json_path)}
+        self._status = {"result": result_data}
 
         try:
             mtime = json_path.stat().st_mtime
             meta = self._session_meta(json_path)
             meta["json_mtime_iso"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime))
-            self._status["last"].update(meta)
+            result_data.update(meta)
         except Exception:
             pass
 
         try:
             from ..analysis.analyzer import AnalysisConfig, AutoCropConfig, TriangulationConfig, analyze_session_json
             from ..analysis.image_processing import CropConfig, LaserExtractConfig
-        except ImportError:
-            self.gcode.respond_info("rubidium: missing dependencies (opencv-python-headless, matplotlib, numpy)")
-            self._status = {"state": "error", "last": {"dir": str(scan_dir), "json": str(json_path), "error": "missing dependencies"}}
-            return
+        except ImportError as e:
+            raise gcmd.error(f"rubidium: unable to import modules, missing dependencies ({e})") from e
 
         session_name = scan_dir.name
         output_dir = self.paths.dirs.analysis / session_name
@@ -138,10 +136,10 @@ class RubidiumAnalyse:
         cc = self._parse_nums(self.crop_center, 2, float)
         cs = self._parse_nums(self.crop_size, 2, int)
         br = self._parse_nums(self.base_resolution, 2, int)
-        
+
         if cc: crop.center_xy = (float(cc[0]), float(cc[1]))
         if cs: crop.wh = (int(cs[0]), int(cs[1]))
-        if br: 
+        if br:
             crop.ref_wh = (int(br[0]), int(br[1]))
         else:
             crop.ref_wh = None
@@ -194,55 +192,73 @@ class RubidiumAnalyse:
         try:
             summary = analyze_session_json(json_path, cfg)
         except Exception as e:
-            self.gcode.respond_info(f"rubidium analyse failed: {e}")
-            self._status = {
-                "state": "error",
-                "last": {"dir": str(scan_dir), "json": str(json_path), "error": str(e)},
-            }
-            return
+            self._status["result"] = None
+            raise gcmd.error(f"rubidium analyse: failed {e}") from e
 
         for warn in summary.warnings:
             self.gcode.respond_info(warn)
 
         if self.crop_auto_center:
-            try:
-                ap = Path(str(output_dir)) / "autocrop.json"
-                if ap.exists():
-                    d = json.loads(ap.read_text(encoding="utf-8"))
-                    cx, cy = d.get("center_xy") or (None, None)
-                    space = str(d.get("center_space") or "")
-                    if cx is not None and cy is not None:
-                        self.gcode.respond_info(f"rubidium autocrop: center={cx:.2f},{cy:.2f} ({space})")
-            except Exception:
-                pass
-
-        if not summary.results:
-            self.gcode.respond_info("rubidium analyse: no valid clips found to analyze.")
-            self._status["state"] = "done"
-            self._status["last"]["best"] = None
-            return
+            self._report_autocrop_result(output_dir)
 
         best = summary.best
-        if best is None:
-            self.gcode.respond_info("rubidium analyse complete, no clear winner.")
-            self._status["state"] = "done"
-            self._status["last"]["best"] = None
-            return
 
-        if best.pa2 is None:
-            msg = f"rubidium analyse: best-value={best.pa:.6f} (score={best.breakdown.score:.3f})"
-        else:
-            msg = f"rubidium analyse: best-value={best.pa:.6f},{best.pa2:.6f} (score={best.breakdown.score:.3f})"
-        if best.grid_row is not None and best.grid_col is not None:
-            msg += f" [r{best.grid_row},c{best.grid_col}]"
+        if not best:
+            result_data["best"] = None
+            raise gcmd.error("rubidium analyse: completed, but no clear winner found.")
 
-        self.gcode.respond_info(msg)
+        val_str = f"{best.pa:.6f}"
+        if best.pa2 is not None:
+            val_str += f", {best.pa2:.6f}"
 
-        self._status["state"] = "done"
-        self._status["last"]["best"] = {
+        loc_str = ""
+        if best.grid_row is not None:
+            loc_str = f" [r{best.grid_row},c{best.grid_col}]"
+
+        self.gcode.respond_info(
+            f"rubidium analyse: best={val_str} (score={best.breakdown.score:.3f}){loc_str}"
+        )
+
+        result_data["best"] = {
             "param": best.pa,
             "param2": best.pa2,
             "score": best.breakdown.score,
             "grid_row": best.grid_row,
             "grid_col": best.grid_col,
         }
+
+        self._apply_tuning_result(meta, best)
+
+    def _report_autocrop_result(self, output_dir: Path):
+        ac_file = output_dir / "autocrop.json"
+        if not ac_file.is_file():
+            return
+
+        try:
+            data = json.loads(ac_file.read_text(encoding="utf-8"))
+            cx, cy = data.get("center_xy", (None, None))
+            space = data.get("center_space", "unknown")
+
+            if cx is not None:
+                self.gcode.respond_info(f"rubidium autocrop: center={cx:.2f},{cy:.2f} ({space})")
+        except (ValueError, OSError):
+            pass
+
+    def _apply_tuning_result(self, meta: dict, best) -> None:
+        scripts = []
+
+        def build_cmd(cmd_key, par_key, value):
+            cmd = meta.get(cmd_key, "").strip()
+            par = meta.get(par_key, "").strip()
+
+            if not cmd or not par or value is None:
+                return
+
+            sep = "" if self.gcode.is_traditional_gcode(cmd) else "="
+            scripts.append(f"{cmd} {par}{sep}{value:.9f}")
+
+        build_cmd("tuning_command", "tuning_parameter", best.pa)
+        build_cmd("tuning_command2", "tuning_parameter2", best.pa2)
+
+        for script in scripts:
+            self.gcode.run_script_from_command(script)

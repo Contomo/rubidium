@@ -137,9 +137,6 @@ class RubidiumPrint(RubidiumBase):
         miny, maxy = min(ys), max(ys)
         z = float(lines.lines[0].start.z)
 
-
-        pa0 = float(lines.lines[0].parameter_value)
-
         brim_lines: List[Line] = []
         for i in range(walls): # type: ignore
             off = sep + (line_w * i)
@@ -158,7 +155,8 @@ class RubidiumPrint(RubidiumBase):
             brim_lines.append(
                 Line(
                     idx=-(walls - i), # type: ignore
-                    parameter_value=pa0,
+                    parameter_value=0.0,
+                    parameter_value2=0.0,
                     start=p0,
                     end=p2,
                     segments=segs,
