@@ -176,6 +176,7 @@ class VideoInput:
         self._old_latency_s: Optional[float] = None
         self._current_outdir: Optional[Path] = None
         self._clips_dir: Optional[Path] = None
+        self._last_session_dir: Optional[Path] = None
 
     def _pick_input_kind(self) -> str:
         kind = self.input_kind
@@ -244,6 +245,7 @@ class VideoInput:
 
         self._current_outdir = session_dir
         self._clips_dir = clips_dir
+        self._last_session_dir = session_dir
         video_path = session_dir / f"{self.video_session_filename}.dump.{self.video_dump_container}"
         log_path = session_dir / f"{self.video_session_filename}.record.log"
         json_path = session_dir / f"{self.video_session_filename}.json"
@@ -361,3 +363,32 @@ class VideoInput:
                     ))
 
         self._planner_cb.schedule_cb(_mark_cb, payload=payload)
+
+
+    def get_status(self) -> Dict[str, Any]:
+        eng = self.engine.get_status()
+        cuts = dict(eng.get("cuts") or {})
+        session = dict(eng.get("session") or {})
+        last_finalize = eng.get("last_finalize") or self._last_finalize
+
+        total = int(cuts.get("total") or 0)
+        done = int(cuts.get("done") or 0)
+        cuts["remaining"] = max(0, total - done)
+
+        state = "idle"
+        if session.get("active"):
+            state = "recording"
+        elif cuts.get("active"):
+            state = "cutting"
+        elif last_finalize is not None:
+            state = "done"
+
+        return {
+            "state": state,
+            "session_id": session.get("id"),
+            "session_dir": (None if self._last_session_dir is None else str(self._last_session_dir)),
+            "json": (None if not isinstance(last_finalize, dict) else last_finalize.get("json")),
+            "cuts": cuts,
+            "counts": dict(eng.get("counts") or {}),
+            "last_finalize": (None if last_finalize is None else dict(last_finalize)),
+        }

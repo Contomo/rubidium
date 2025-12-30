@@ -40,6 +40,25 @@ class RubidiumScan(RubidiumBase):
             "dirname":          gcmd.get("DIRNAME", self._run_pattern_name),
         }
 
+
+    def get_status(self, eventtime=None):
+        st = super().get_status(eventtime)
+        st["video"] = self.video.get_status()
+        return st
+
+    def _vsd_get_status(self, eventtime):
+        st = super()._vsd_get_status(eventtime)
+        v = self.video.get_status()
+        st["video"] = v
+        cuts = dict((v or {}).get("cuts") or {})
+        st["clips"] = {
+            "active": cuts.get("active"),
+            "progress": cuts.get("progress"),
+            "done": cuts.get("done"),
+            "total": cuts.get("total"),
+            "remaining": cuts.get("remaining"),
+        }
+        return st
     def handle_shutdown(self) -> None:
         try:
             self.video.stop_session(finalize=False)

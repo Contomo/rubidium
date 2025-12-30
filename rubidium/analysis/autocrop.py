@@ -36,8 +36,7 @@ _LOCK_MIN_SAMPLES = 8
 
 # Tracker / Collection Settings
 _TRACK_ALPHA = 0.50
-_GATE_FRAC = 0.35
-_GATE_MIN_PX = 40.0
+_GATE_FRAC = 0.25
 _MAX_JUMP_FRAC = 0.50
 
 # Curve / Smoothing Settings
@@ -198,7 +197,7 @@ class _CropTracker:
         self.xy = initial_xy
         self.locked = False
         self.lock_buffer: List[Tuple[float, float]] = []
-        self.gate_px = max(_GATE_MIN_PX, float(min(out_wh)) * _GATE_FRAC)
+        self.gate_px = _GATE_FRAC * float(min(out_wh))
         self.max_jump = _MAX_JUMP_FRAC * float(min(out_wh))
         self.strong_signal_thresh = float(lc.min_profile_energy) * 3.0
 

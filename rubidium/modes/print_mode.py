@@ -138,7 +138,7 @@ class RubidiumPrint(RubidiumBase):
         z = float(lines.lines[0].start.z)
 
         brim_lines: List[Line] = []
-        for i in range(walls): # type: ignore
+        for i in range(walls - 1, -1, -1): # type: ignore
             off = sep + (line_w * i)
             x0, x1 = minx - off, maxx + off
             y0, y1 = miny - off, maxy + off

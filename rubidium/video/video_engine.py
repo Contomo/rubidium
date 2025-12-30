@@ -69,6 +69,17 @@ class VideoEngine(threading.Thread):
         self.ffmpeg_path: str = "ffmpeg"
         self.nice_level: int = 0
 
+        self._lock = threading.Lock()
+
+        # clip cutting (post-processing) progress
+        self.cut_active: bool = False
+        self.cut_total: int = 0
+        self.cut_done: int = 0
+        self.cut_ok: int = 0
+        self.cut_current: Optional[str] = None
+        self.cut_last_error: Optional[str] = None
+        self.last_finalize: Optional[Dict[str, Any]] = None
+
     def configure(self, ffmpeg_bin: str, nice_level: int):
         self.ffmpeg_path = ffmpeg_bin
         self.nice_level = nice_level
@@ -88,6 +99,32 @@ class VideoEngine(threading.Thread):
             cmd.request_mono = time.monotonic()
         self._queue.put(cmd)
 
+
+    def get_status(self) -> Dict[str, Any]:
+        """Return a thread-safe snapshot of the engine state."""
+        with self._lock:
+            cuts_total = int(self.cut_total)
+            cuts_done = int(self.cut_done)
+            cuts_ok = int(self.cut_ok)
+            progress = (cuts_done / cuts_total) if cuts_total > 0 else None
+            return {
+                "session": dict(self.session_data),
+                "cuts": {
+                    "active": bool(self.cut_active),
+                    "total": cuts_total,
+                    "done": cuts_done,
+                    "ok": cuts_ok,
+                    "current": self.cut_current,
+                    "progress": progress,
+                    "last_error": self.cut_last_error,
+                },
+                "counts": {
+                    "marks": len(self.marks_list),
+                    "clips": len(self.clips_list),
+                    "pending_cuts": len(self.pending_cuts),
+                },
+                "last_finalize": (None if self.last_finalize is None else dict(self.last_finalize)),
+            }
     def run(self):
         while True:
             try:
@@ -105,7 +142,9 @@ class VideoEngine(threading.Thread):
         elif isinstance(cmd, CmdLogMark):
             self._do_mark(cmd)
         elif isinstance(cmd, CmdQueueCut):
-            self.pending_cuts.append(cmd)
+            with self._lock:
+                self.pending_cuts.append(cmd)
+                self.cut_total += 1
         
 
     def _do_start(self, cmd: CmdStartRecording):
@@ -113,18 +152,27 @@ class VideoEngine(threading.Thread):
             logging.warning("rubidium_video: received start while already running")
             return
 
-        self.json_path = cmd.json_path
-        self.session_data = {
-            "id": cmd.session_id,
-            "file": self._rel_path(cmd.output_path),
-            "start_time": time.time(),
-            "active": True,
-            "startup_lag": 0.0,
-            "meta": dict(cmd.session_meta or {}),
-        }
-        self.marks_list = []
-        self.clips_list = []
-        self.pending_cuts = []
+        with self._lock:
+            self.json_path = cmd.json_path
+            self.session_data = {
+                "id": cmd.session_id,
+                "file": self._rel_path(cmd.output_path),
+                "start_time": time.time(),
+                "active": True,
+                "startup_lag": 0.0,
+                "meta": dict(cmd.session_meta or {}),
+            }
+            self.marks_list = []
+            self.clips_list = []
+            self.pending_cuts = []
+
+            self.cut_active = False
+            self.cut_total = 0
+            self.cut_done = 0
+            self.cut_ok = 0
+            self.cut_current = None
+            self.cut_last_error = None
+            self.last_finalize = None
 
         log_f = None
         try:
@@ -142,7 +190,8 @@ class VideoEngine(threading.Thread):
                 text=True,
                 close_fds=True
             )
-            self.session_data["pid"] = self._proc.pid
+            with self._lock:
+                self.session_data["pid"] = self._proc.pid
 
         except Exception as e:
             logging.error(f"rubidium_video: failed to start ffmpeg: {e}")
@@ -174,12 +223,14 @@ class VideoEngine(threading.Thread):
             real_start_mono = spawn_start_mono
 
         self._startup_lag = real_start_mono - cmd.request_mono
-        self.session_data["startup_lag"] = self._startup_lag
+        with self._lock:
+            self.session_data["startup_lag"] = self._startup_lag
         
         logging.info(f"rubidium_video: sync established. startup_lag={self._startup_lag:.4f}s")
 
     def _do_mark(self, cmd: CmdLogMark):
-        self.marks_list.append(cmd.mark_data)
+        with self._lock:
+            self.marks_list.append(cmd.mark_data)
 
     def _do_stop(self, cmd: CmdStopRecording):
         if self._proc:
@@ -193,8 +244,9 @@ class VideoEngine(threading.Thread):
                 except subprocess.TimeoutExpired:
                     logging.warning("rubidium_video: ffmpeg did not exit after kill()")
 
-            self.session_data["active"] = False
-            self.session_data["returncode"] = self._proc.returncode
+            with self._lock:
+                self.session_data["active"] = False
+                self.session_data["returncode"] = self._proc.returncode
             self._proc = None
 
         err: Optional[str] = None
@@ -205,32 +257,42 @@ class VideoEngine(threading.Thread):
             logging.exception("rubidium_video: finalize/post-processing failed")
             err = str(e)
         finally:
+            result = {
+                "ok": err is None,
+                "error": err,
+                "json": str(self.json_path) if self.json_path else None,
+                "session_id": self.session_data.get("id"),
+                "clips": len(self.clips_list),
+                "marks": len(self.marks_list),
+            }
+            with self._lock:
+                self.last_finalize = dict(result)
             if cmd.completion is not None:
-                cmd.completion.result = {
-                    "ok": err is None,
-                    "error": err,
-                    "json": str(self.json_path) if self.json_path else None,
-                    "session_id": self.session_data.get("id"),
-                    "clips": len(self.clips_list),
-                    "marks": len(self.marks_list),
-                }
+                cmd.completion.result = dict(result)
                 cmd.completion.event.set()
 
     def _flush_json(self):
-        if not self.json_path:
+        json_path = None
+        with self._lock:
+            if self.json_path:
+                json_path = self.json_path
+            session = dict(self.session_data)
+            marks = list(self.marks_list)
+            clips = list(self.clips_list)
+        if not json_path:
             return
-        
+
         data = {
-            "session": self.session_data,
-            "marks": self.marks_list,
-            "clips": self.clips_list
+            "session": session,
+            "marks": marks,
+            "clips": clips,
         }
-        
+
         try:
-            with open(self.json_path, "w", encoding="utf-8") as f:
+            with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, default=str)
         except Exception:
-            pass 
+            pass
 
     def _run_post_processing(self):
         if not self.pending_cuts:
@@ -240,17 +302,37 @@ class VideoEngine(threading.Thread):
             os.nice(self.nice_level)
         except Exception:
             pass
+        with self._lock:
+            self.cut_active = True
+            # cut_total is incremented when CmdQueueCut is received; this is a safety sync.
+            self.cut_total = max(self.cut_total, len(self.pending_cuts))
+            self.cut_done = 0
+            self.cut_ok = 0
+            self.cut_current = None
+            self.cut_last_error = None
+
         for cut_job in list(self.pending_cuts):
+            with self._lock:
+                self.cut_current = str(cut_job.clip_metadata.get("key") or self._rel_path(cut_job.output_path))
             success = self._exec_ffmpeg_cut(cut_job)
             
             result_record = cut_job.clip_metadata.copy()
             result_record["ok"] = success
             result_record["file"] = self._rel_path(cut_job.output_path)
-            self.clips_list.append(result_record)
+            with self._lock:
+                self.clips_list.append(result_record)
+                self.cut_done += 1
+                if success:
+                    self.cut_ok += 1
+                else:
+                    self.cut_last_error = "cut_failed"
             
             self._flush_json()
 
-        self.pending_cuts.clear()
+        with self._lock:
+            self.pending_cuts.clear()
+            self.cut_active = False
+            self.cut_current = None
 
     def _exec_ffmpeg_cut(self, job: CmdQueueCut) -> bool:
         """Directly runs ffmpeg to cut the clip"""
