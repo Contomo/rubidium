@@ -63,7 +63,7 @@ def parse_session_clips(session_dir: Path, clips: Iterable[Dict[str, Any]]) -> T
             continue
 
         p = Path(str(raw))
-        vid_path = p if p.is_absolute() else (session_dir / p.name)
+        vid_path = p if p.is_absolute() else (session_dir / p)
         if not vid_path.exists():
             counts.clips_missing_file += 1
             continue

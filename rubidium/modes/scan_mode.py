@@ -35,8 +35,9 @@ class RubidiumScan(RubidiumBase):
     def _extra_settings_from(self, gcmd) -> Dict[str, Any]:
         return {
             "video_latency_ms": gcmd.get_float("VIDEO_LATENCY_MS", None),
-            "scan_speed":  gcmd.get_float("SCAN_SPEED",  self.scan_speed, above=0.0),
-            "scan_buffer": gcmd.get_float("SCAN_BUFFER", self.scan_buffer, minval=0.0),
+            "scan_speed":       gcmd.get_float("SCAN_SPEED",  self.scan_speed, above=0.0),
+            "scan_buffer":      gcmd.get_float("SCAN_BUFFER", self.scan_buffer, minval=0.0),
+            "dirname":          gcmd.get("DIRNAME", self._run_pattern_name),
         }
 
     def handle_shutdown(self) -> None:
@@ -61,7 +62,7 @@ class RubidiumScan(RubidiumBase):
         ):
             yield ln
         yield "G90"
-        if getattr(s, 'video_latency_ms', None) is not None:
+        if s.get("video_latency_ms") is not None:
             self.video.set_latency_offset(s["video_latency_ms"])
 
         meta = {
@@ -77,7 +78,11 @@ class RubidiumScan(RubidiumBase):
                 "tuning_parameter2": str(pat.settings.get("tuning_parameter2", "")).strip(),
             })
 
-        self.video.start_session(self._outdir, meta=meta)
+        self.video.start_session(
+            self._outdir,
+            meta=meta,
+            dirname=s.get('dirname', self._run_pattern_name or "scan").strip()
+        )
 
         travel_speed = float(s.get("travel_speed", self.v_travel))
         scan_speed  = float(s.get("scan_speed", 10.0))

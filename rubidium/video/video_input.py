@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shlex
 import time
 from pathlib import Path
@@ -64,6 +65,19 @@ def _norm_video_size(res: str) -> Optional[str]:
     except Exception:
         return None
 
+
+
+def _sanitize_path_segment(name: Optional[str]) -> str:
+    s = (name or "").strip()
+    if not s:
+        return "scan"
+    s = re.sub(r"\s+", "_", s)
+    s = s.replace(os.sep, "_")
+    if os.altsep:
+        s = s.replace(os.altsep, "_")
+    s = re.sub(r"[^A-Za-z0-9_.-]+", "_", s)
+    s = s.strip("._-")
+    return s or "scan"
 
 
 class PlannerCallback:
@@ -161,6 +175,7 @@ class VideoInput:
         self._active_marks: Dict[str, Tuple[float, Dict[str, Any]]] = {} 
         self._old_latency_s: Optional[float] = None
         self._current_outdir: Optional[Path] = None
+        self._clips_dir: Optional[Path] = None
 
     def _pick_input_kind(self) -> str:
         kind = self.input_kind
@@ -215,19 +230,20 @@ class VideoInput:
         if self._old_latency_s is None: return
         self.latency_s = self._old_latency_s
 
-    def start_session(self, outdir: Path, *, meta: Optional[Dict[str, Any]] = None) -> None:
+    def start_session(self, outdir: Path, *, meta: Optional[Dict[str, Any]] = None, dirname: Optional[str] = None) -> None:
         """Prepare session paths and schedule recording start"""
         
-        ts = time.strftime("%Y-%m-%d_%H-%M", time.localtime())
-        sid = f"{ts}_{os.getpid()}"
-        session_dir = Path(outdir) / f"recording_{sid}"
-        
-        try:
-            session_dir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass 
+        session_name = f"{_sanitize_path_segment(dirname)}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}"
+        session_dir = Path(outdir) / session_name
+        if session_dir.exists():
+            session_dir = Path(outdir) / f"{session_name}_{os.getpid()}"
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        clips_dir = session_dir / "clips"
+        clips_dir.mkdir(parents=True, exist_ok=True)
 
         self._current_outdir = session_dir
+        self._clips_dir = clips_dir
         video_path = session_dir / f"{self.video_session_filename}.dump.{self.video_dump_container}"
         log_path = session_dir / f"{self.video_session_filename}.record.log"
         json_path = session_dir / f"{self.video_session_filename}.json"
@@ -244,7 +260,7 @@ class VideoInput:
             self.gcode.respond_info(f"rubidium_video: starting recording -> {video_path.name}")
             
             self.engine.submit(CmdStartRecording(
-                session_id=sid,
+                session_id=session_dir.name,
                 output_path=video_path,
                 cmd_args=cmd_args,
                 log_path=log_path,
@@ -264,6 +280,8 @@ class VideoInput:
             self._session_start_pt = None
             self._active_marks.clear()
             self.reset_latency_offset()
+            self._clips_dir = None
+            self._current_outdir = None
 
         self._planner_cb.schedule_cb(_end_cb, payload=None)
 
@@ -313,12 +331,12 @@ class VideoInput:
                 
             elif pl["kind"] == "end":
                 mark = self._active_marks.pop(pl["key"], None)
-                if mark is not None and self._current_outdir:
+                if mark is not None and self._current_outdir and self._clips_dir:
                     start_ts, start_meta = mark
                     duration = t_s - start_ts
                     
                     out_name = f"{self.video_cut_filename}_{pl['idx']:03d}.mp4"
-                    out_path = self._current_outdir / out_name
+                    out_path = self._clips_dir / out_name
                     dump_path = self._current_outdir / f"{self.video_session_filename}.dump.{self.video_dump_container}"
 
                     clip_meta = {

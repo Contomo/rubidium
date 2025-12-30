@@ -73,6 +73,16 @@ class VideoEngine(threading.Thread):
         self.ffmpeg_path = ffmpeg_bin
         self.nice_level = nice_level
 
+
+    def _rel_path(self, p: Path) -> str:
+        if self.json_path is not None:
+            base = self.json_path.parent
+            try:
+                return str(p.relative_to(base))
+            except ValueError:
+                pass
+        return str(p)
+
     def submit(self, cmd: Any):
         if isinstance(cmd, CmdStartRecording):
             cmd.request_mono = time.monotonic()
@@ -97,7 +107,6 @@ class VideoEngine(threading.Thread):
         elif isinstance(cmd, CmdQueueCut):
             self.pending_cuts.append(cmd)
         
-        self._flush_json()
 
     def _do_start(self, cmd: CmdStartRecording):
         if self._proc is not None:
@@ -107,7 +116,7 @@ class VideoEngine(threading.Thread):
         self.json_path = cmd.json_path
         self.session_data = {
             "id": cmd.session_id,
-            "file": str(cmd.output_path),
+            "file": self._rel_path(cmd.output_path),
             "start_time": time.time(),
             "active": True,
             "startup_lag": 0.0,
@@ -231,13 +240,12 @@ class VideoEngine(threading.Thread):
             os.nice(self.nice_level)
         except Exception:
             pass
-
         for cut_job in list(self.pending_cuts):
             success = self._exec_ffmpeg_cut(cut_job)
             
             result_record = cut_job.clip_metadata.copy()
             result_record["ok"] = success
-            result_record["file"] = str(cut_job.output_path)
+            result_record["file"] = self._rel_path(cut_job.output_path)
             self.clips_list.append(result_record)
             
             self._flush_json()
