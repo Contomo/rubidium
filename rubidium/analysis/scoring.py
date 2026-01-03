@@ -47,6 +47,16 @@ def score_heightmap(
     drop_frac = float(np.mean(~np.isfinite(hm)))
     dropouts = 10.0 * drop_frac
 
+    # Additional penalty for *concentrated* NaNs (e.g. a persistent gap band).
+    # Global dropout fraction can be small even when the ROI is entirely missing.
+    bins = int(hm.shape[1])
+    if bins >= 8:
+        pad = max(1, int(round(0.05 * bins)))
+        core = hm[:, pad:bins - pad] if bins > 2 * pad else hm
+        row_drop = np.mean(~np.isfinite(core), axis=0).astype(np.float32)
+        p99 = float(np.percentile(row_drop, 99.0))
+        dropouts += 5.0 * p99
+
     roughness = _nanmean(np.nanstd(hm, axis=0))
     score = float(roughness + dropouts)
 

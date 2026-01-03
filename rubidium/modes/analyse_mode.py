@@ -1,10 +1,10 @@
 # rubidium/modes/analyse_mode.py
 from __future__ import annotations
 
-import time, json
-
+import time
+import json
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 from ..core.configview import ConfigView
 from ..analysis.graphing import RubidiumPaths
@@ -20,14 +20,17 @@ class RubidiumAnalyse:
         self.cv = ConfigView(base=self.base_section, override=self.section)
         self.paths = RubidiumPaths(self.printer, base_section=self.base_section, section=self.section)
 
+        # --- General / Output ---
         self.write_plots = self.cv.get_bool("analysis_write_plots", False)
         self.write_npz = self.cv.get_bool("analysis_write_npz", False)
-
+        
+        # --- Crop Settings ---
         self.crop_center = self.cv.get_str_opt("crop_center")
         self.crop_size = self.cv.get_str_opt("crop_size")
         self.crop_auto_center = self.cv.get_bool("crop_auto_center", False)
         self.base_resolution = self.cv.get_str_opt("base_resolution")
 
+        # --- Laser Extraction ---
         self.laser_hsv_lower = self.cv.get_str_opt("laser_hsv_lower")
         self.laser_hsv_upper = self.cv.get_str_opt("laser_hsv_upper")
         self.laser_bright_percentile = self.cv.get_float("laser_bright_percentile", -1.0, minval=-1.0, maxval=100.0)
@@ -35,18 +38,20 @@ class RubidiumAnalyse:
         self.laser_min_row_energy = self.cv.get_float("laser_min_row_energy", 1.0, minval=0.0)
         self.laser_median_ksize = self.cv.get_int("laser_median_ksize", 5, minval=0)
         self.laser_morph_ksize = self.cv.get_int("laser_morph_ksize", 3, minval=0)
-
+        
+        # --- Pre-processing (CLAHE/Blur) ---
         self.laser_use_clahe = self.cv.get_bool("laser_use_clahe", True)
         self.laser_blur_ksize = self.cv.get_int("laser_blur_ksize", 5, minval=0)
         self.laser_clahe_clip = self.cv.get_float("laser_clahe_clip", 3.0, minval=0.0)
         self.laser_clahe_grid = self.cv.get_int_list("laser_clahe_grid", (8, 8), count=2)
 
+        # --- Pipeline Control ---
         self.analysis_pipeline = self.cv.get_str_opt("analysis_pipeline")
-
         self.frame_step = self.cv.get_int("analysis_frame_step", 1, minval=1)
         self.max_frames = self.cv.get_int("analysis_max_frames", 0, minval=0)
         self.score_trim_frac = self.cv.get_float("analysis_trim_frac", 0.10, minval=0.0, maxval=0.45)
 
+        # --- Triangulation ---
         self.triangulate_enable = self.cv.get_bool("triangulate_enable", False)
         self.camera_calibration = self.cv.get_str_opt("camera_calibration")
         self.laser_plane = self.cv.get_str_opt("laser_plane")
@@ -55,10 +60,17 @@ class RubidiumAnalyse:
         self.triangulate_min_height_range = self.cv.get_float("triangulate_min_height_range", 0.0, minval=0.0)
         self.triangulate_gate_fail_score = self.cv.get_float("triangulate_gate_fail_score", 3.0, minval=0.0)
 
+        # --- GCode Registration ---
         self.gcode.register_command(
             "RUBIDIUM_ANALYSE",
             self.cmd_RUBIDIUM_ANALYSE,
             desc=self.cmd_RUBIDIUM_ANALYSE_help
+        )
+
+        self.gcode.register_command(
+            "RUBIDIUM_ANALYSE_PREVIEW_CLIP",
+            self.cmd_RUBIDIUM_ANALYSE_PREVIEW_CLIP,
+            desc=self.cmd_RUBIDIUM_ANALYSE_PREVIEW_CLIP_help,
         )
 
         self._status: Dict[str, Any] = {"result": None}
@@ -68,78 +80,93 @@ class RubidiumAnalyse:
 
     @staticmethod
     def _session_meta(json_path: Path) -> dict:
-        data = json.loads(json_path.read_text(encoding="utf-8"))
-        sess = data.get("session") or {}
-        meta = sess.get("meta") or {}
-        return {
-            "pattern": meta.get("pattern"),
-            "session_id": sess.get("id"),
-            "start_time": sess.get("start_time"),
-            "clips": len(data.get("clips") or []),
-        }
+        try:
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+            sess = data.get("session") or {}
+            meta = sess.get("meta") or {}
+            return {
+                "pattern": meta.get("pattern"),
+                "session_id": sess.get("id"),
+                "start_time": sess.get("start_time"),
+                "clips": len(data.get("clips") or []),
+            }
+        except Exception:
+            return {}
 
     @staticmethod
     def _parse_nums(s: Optional[str], n: int, cast=float) -> Optional[tuple]:
-        if not s: return None
+        if not s: 
+            return None
         try:
+            # Handle comma or space separation
             parts = [p.strip() for p in str(s).replace(",", " ").split() if p.strip()]
-            if len(parts) < n: return None
+            if len(parts) < n: 
+                return None
             return tuple(cast(parts[i]) for i in range(n))
-        except Exception: return None
+        except (ValueError, TypeError): 
+            return None
 
-    def _resolve_scan_dir(self, gcmd) -> Optional[Path]:
+    def _resolve_scan_target(self, gcmd) -> tuple[Path, Path]:
+        """
+        Resolves the scan directory and session JSON path based on GCode arguments.
+        Raises gcmd.error if resolution fails or files are missing.
+        """
         self.paths.ensure_dirs()
         scan_root = self.paths.dirs.scan
 
         raw_dir = gcmd.get("DIR", None)
         raw_sess = gcmd.get("SESSION", None)
+        target_dir: Optional[Path] = None
 
         if raw_dir:
             p = Path(str(raw_dir)).expanduser()
-            return p if p.is_absolute() else (scan_root / p)
-        if raw_sess:
-            return scan_root / str(raw_sess)
-        return self.paths.latest_run_dir(scan_root)
+            target_dir = p if p.is_absolute() else (scan_root / p)
+        elif raw_sess:
+            target_dir = scan_root / str(raw_sess)
+        else:
+            target_dir = self.paths.latest_run_dir(scan_root)
+            if target_dir is None:
+                raise gcmd.error("rubidium: no previous scan history found to analyse.")
 
-    cmd_RUBIDIUM_ANALYSE_help = "Analyse recorded scan clips. Usage: RUBIDIUM_ANALYSE [DIR=...]"
+        if not target_dir.is_dir():
+            if raw_dir or raw_sess:
+                raise gcmd.error(f"rubidium: scan directory not found: '{target_dir}'")
+            raise gcmd.error("rubidium: failed to resolve valid scan directory.")
 
-    def cmd_RUBIDIUM_ANALYSE(self, gcmd) -> None:
-        scan_dir = self._resolve_scan_dir(gcmd)
-        if scan_dir is None or not scan_dir.is_dir():
-            raise gcmd.error("rubidium: no scan directory found.")
+        json_path = target_dir / "rubidium_scan_session.json"
+        if not json_path.is_file():
+            raise gcmd.error(f"rubidium: invalid session (missing 'rubidium_scan_session.json') in '{target_dir.name}'")
 
-        json_path = scan_dir / "rubidium_scan_session.json"
-        if not json_path.exists():
-            raise gcmd.error(f"rubidium: no session JSON found in {scan_dir.name}")
+        return target_dir, json_path
 
-        result_data: Dict[str, Any] = {"dir": str(scan_dir), "json": str(json_path)}
-        self._status = {"result": result_data}
 
+    def _build_analysis_cfg(self, *, output_dir: Path, crop_auto_center: Optional[bool] = None) -> Any:
+        """Build an AnalysisConfig from current config settings."""
         try:
-            mtime = json_path.stat().st_mtime
-            meta = self._session_meta(json_path)
-            meta["json_mtime_iso"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime))
-            result_data.update(meta)
-        except Exception:
-            pass
-
-        try:
-            from ..analysis.analyzer import AnalysisConfig, AutoCropConfig, TriangulationConfig, analyze_session_json
+            from ..analysis.analyzer import AnalysisConfig, AutoCropConfig, TriangulationConfig
             from ..analysis.image_processing import CropConfig, LaserExtractConfig
         except ImportError as e:
-            raise gcmd.error(f"rubidium: unable to import modules, missing dependencies ({e})") from e
+            raise RuntimeError(f"rubidium: unable to import modules, missing dependencies ({e})") from e
 
-        session_name = scan_dir.name
-        output_dir = self.paths.dirs.analysis / session_name
+        # Resolve Auto Crop
+        ac_enable = bool(self.crop_auto_center) if crop_auto_center is None else bool(crop_auto_center)
+        
+        # Parse Pipeline Steps
+        pipeline_steps = None
+        if self.analysis_pipeline:
+            pipeline_steps = [
+                p.strip()
+                for p in str(self.analysis_pipeline).replace("\n", " ").replace(",", " ").split()
+                if p.strip()
+            ]
 
+        # Config Objects
         crop = CropConfig()
-        cc = self._parse_nums(self.crop_center, 2, float)
-        cs = self._parse_nums(self.crop_size, 2, int)
-        br = self._parse_nums(self.base_resolution, 2, int)
-
-        if cc: crop.center_xy = (float(cc[0]), float(cc[1]))
-        if cs: crop.wh = (int(cs[0]), int(cs[1]))
-        if br:
+        if (cc := self._parse_nums(self.crop_center, 2, float)):
+            crop.center_xy = (float(cc[0]), float(cc[1]))
+        if (cs := self._parse_nums(self.crop_size, 2, int)):
+            crop.wh = (int(cs[0]), int(cs[1]))
+        if (br := self._parse_nums(self.base_resolution, 2, int)):
             crop.ref_wh = (int(br[0]), int(br[1]))
         else:
             crop.ref_wh = None
@@ -148,7 +175,8 @@ class RubidiumAnalyse:
         hsv_hi = self._parse_nums(self.laser_hsv_upper, 3, int)
 
         laser = LaserExtractConfig(
-            hsv_lower=hsv_lo, hsv_upper=hsv_hi,
+            hsv_lower=hsv_lo,
+            hsv_upper=hsv_hi,
             bright_percentile=float(self.laser_bright_percentile),
             weight_power=float(self.laser_weight_power),
             min_row_energy=float(self.laser_min_row_energy),
@@ -157,7 +185,7 @@ class RubidiumAnalyse:
             use_clahe=bool(self.laser_use_clahe),
             blur_ksize=int(self.laser_blur_ksize),
             clahe_clip=float(self.laser_clahe_clip),
-            clahe_grid=self.laser_clahe_grid, # type: ignore
+            clahe_grid=self.laser_clahe_grid,  # type: ignore
         )
 
         tri = TriangulationConfig(
@@ -170,14 +198,11 @@ class RubidiumAnalyse:
             gate_fail_score=float(self.triangulate_gate_fail_score),
         )
 
-        pipeline_steps = None
-        if self.analysis_pipeline is not None:
-            pipeline_steps = [p.strip() for p in str(self.analysis_pipeline).replace("\n", " ").replace(",", " ").split() if p.strip()]
-        cfg = AnalysisConfig(
+        return AnalysisConfig(
             crop=crop,
             laser=laser,
             triangulation=tri,
-            autocrop=AutoCropConfig(enable=self.crop_auto_center),
+            autocrop=AutoCropConfig(enable=ac_enable),
             frame_step=int(self.frame_step),
             max_frames=int(self.max_frames),
             write_plots=bool(self.write_plots),
@@ -186,9 +211,91 @@ class RubidiumAnalyse:
             pipeline_steps=pipeline_steps,
             score_trim_frac=float(self.score_trim_frac),
         )
+    
+    
+    cmd_RUBIDIUM_ANALYSE_PREVIEW_CLIP_help = (
+        "Render a tiled debug preview video for one recorded clip. "
+        "Usage: RUBIDIUM_ANALYSE_PREVIEW_CLIP IDX=<n> [DIR=...|SESSION=...] [SCALE=2] [MAX_FRAMES=0]"
+    )
+    def cmd_RUBIDIUM_ANALYSE_PREVIEW_CLIP(self, gcmd) -> None:
+        idx = gcmd.get_int("IDX", None)
+        if idx is None or idx < 0:
+            raise gcmd.error("rubidium: IDX=<n> is required")
+
+        # Resolve directories
+        scan_dir, json_path = self._resolve_scan_target(gcmd)
+        
+        outdir = scan_dir / "analysis"
+        outdir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            from ..analysis.clips import parse_session_clips
+            from ..analysis.clip_debug import ClipDebugOptions, render_scan_debug_preview_clip
+        except ImportError as e:
+            raise gcmd.error(f"rubidium: missing debug dependencies ({e})") from e
+
+        # Load session data
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        clips_raw = data.get("clips") or []
+        clips, _ = parse_session_clips(scan_dir, clips_raw)
+
+        clip = next((c for c in clips if int(c.idx) == int(idx)), None)
+        if clip is None:
+            raise gcmd.error(f"rubidium: clip IDX={idx} not found in session")
+
+        # Configure and Render
+        cfg = self._build_analysis_cfg(output_dir=outdir, crop_auto_center=False)
+        scale = gcmd.get_int("SCALE", 2, minval=1, maxval=8)
+        max_frames = gcmd.get_int("MAX_FRAMES", 0, minval=0)
+        out_mp4 = outdir / f"dbg_preview_clip_{int(idx):03d}.mp4"
+
+        gcmd.respond_info(f"rubidium: rendering debug preview for clip {int(idx):03d}...")
+
+        try:
+            p = render_scan_debug_preview_clip(
+                cfg=cfg,
+                clip_path=clip.path,
+                out_mp4=out_mp4,
+                mirror_x=bool(clip.mirror_x),
+                clip_idx=int(idx),
+                opts=ClipDebugOptions(tile_scale=int(scale), max_frames=int(max_frames)),
+            )
+        except Exception as e:
+            raise gcmd.error(f"rubidium: debug preview failed: {e}") from e
+
+        gcmd.respond_info(f"rubidium: debug preview written: {p}")
+
+
+    cmd_RUBIDIUM_ANALYSE_help = "Analyse recorded scan clips. Usage: RUBIDIUM_ANALYSE [DIR=...]"
+
+    def cmd_RUBIDIUM_ANALYSE(self, gcmd) -> None:
+        scan_dir, json_path = self._resolve_scan_target(gcmd)
+
+        result_data: Dict[str, Any] = {"dir": str(scan_dir), "json": str(json_path)}
+        self._status = {"result": result_data}
+
+        # 1. Read Meta
+        try:
+            mtime = json_path.stat().st_mtime
+            meta = self._session_meta(json_path)
+            meta["json_mtime_iso"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(mtime))
+            result_data.update(meta)
+        except Exception:
+            pass
+
+        try:
+            from ..analysis.analyzer import analyze_session_json
+        except ImportError as e:
+            raise gcmd.error(f"rubidium: unable to import analyzer, missing dependencies ({e})") from e
+
+        # 2. Setup Configuration
+        session_name = scan_dir.name
+        output_dir = Path(self.paths.dirs.analysis) / session_name
+        cfg = self._build_analysis_cfg(output_dir=output_dir, crop_auto_center=self.crop_auto_center)
 
         self.gcode.respond_info(f"rubidium: analyzing session {scan_dir.name}...")
 
+        # 3. Run Analysis
         try:
             summary = analyze_session_json(json_path, cfg)
         except Exception as e:
@@ -207,6 +314,7 @@ class RubidiumAnalyse:
             result_data["best"] = None
             raise gcmd.error("rubidium analyse: completed, but no clear winner found.")
 
+        # 4. Report Results
         val_str = f"{best.pa:.6f}"
         if best.pa2 is not None:
             val_str += f", {best.pa2:.6f}"
