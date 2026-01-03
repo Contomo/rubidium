@@ -215,7 +215,7 @@ class _CropTracker:
         dist = math.hypot(dx, dy)
         is_strong = score > self.strong_signal_thresh
         
-        if dist < self.gate_px or is_strong:
+        if dist < self.gate_px or (is_strong and dist < self.max_jump): 
             dx_c, dy_c = _clamp_delta(dx, dy, self.max_jump)
             self.xy = (
                 self.xy[0] * (1 - _TRACK_ALPHA) + (self.xy[0] + dx_c) * _TRACK_ALPHA,
